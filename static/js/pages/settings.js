@@ -68,7 +68,6 @@ export async function render(container) {
                     <div class="form-group">
                         <label>浏览器代理 (降低 Cloudflare 验证概率)</label>
                         <input type="text" class="form-input" id="s-browser-proxy" value="${s.browser_proxy || ''}" placeholder="http://127.0.0.1:7897 （留空=直连）">
-                        <div style="margin-top:6px;font-size:12px;color:var(--text-secondary);">对齐 automation/tooling/grok-register：代理出口通常可显著减少 grok.com 人机验证</div>
                     </div>
                     <div class="form-group" style="visibility: hidden;"></div>
                 </div>
