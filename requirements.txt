@@ -1,0 +1,5 @@
+Flask>=3.0
+Flask-SocketIO>=5.3
+DrissionPage==4.1.0.9
+requests>=2.31
+curl_cffi>=0.7

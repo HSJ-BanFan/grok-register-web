@@ -1,0 +1,1696 @@
+import logging
+import threading
+import time
+import string
+import random
+import secrets
+import re
+from datetime import datetime
+
+from DrissionPage.errors import PageDisconnectedError
+from config import SIGNUP_URL
+from core.grok2api_client import upload_registered_sso
+from core.account_activation import activate_grok_web
+
+logger = logging.getLogger('register')
+
+
+def submit_is_in_flight(ui_state):
+    """A post-click disabled primary button means the submit request still owns the form."""
+    state = ui_state or {}
+    return bool(state.get('loading') or state.get('primaryDisabled'))
+
+
+class RegistrationState:
+    def __init__(self):
+        self._pause_event = threading.Event()
+        self._stop_lock = threading.Lock()
+        self._stop_flag = False
+        self._pause_event.set()
+        self.status = 'stopped'
+        self.current_round = 0
+        self.current_email = ''
+        self.completed = 0
+        self.success = 0
+        self.failed = 0
+
+    def check_pause(self):
+        self._pause_event.wait()
+
+    def should_stop(self):
+        with self._stop_lock:
+            return self._stop_flag
+
+    def pause(self):
+        self._pause_event.clear()
+        self.status = 'paused'
+        logger.info("Registration paused")
+
+    def resume(self):
+        self._pause_event.set()
+        self.status = 'running'
+        logger.info("Registration resumed")
+
+    def stop(self):
+        with self._stop_lock:
+            self._stop_flag = True
+        self.status = 'stopped'
+        logger.info("Registration stop requested")
+
+    def get_snapshot(self):
+        return {
+            'status': self.status,
+            'current_round': self.current_round,
+            'current_email': self.current_email,
+            'completed': self.completed,
+            'success': self.success,
+            'failed': self.failed,
+        }
+
+
+class RegistrationEngine:
+    def __init__(self, db, browser_mgr, email_mgr, socketio, state):
+        self.db = db
+        self.browser = browser_mgr
+        self.email_mgr = email_mgr
+        self.socketio = socketio
+        self.state = state
+
+    def run(self, max_rounds=0, max_retries=3):
+        self.state.status = 'running'
+        self.email_mgr.reset_fallback()
+        settings = self.db.get_settings()
+        headless = settings.get('browser_headless', 'false') == 'true'
+
+        logger.info(f"Registration started (max_rounds={max_rounds or 'unlimited'}, max_retries={max_retries})")
+
+        # Start browser
+        try:
+            self.browser.headless = headless
+            self.browser.proxy = (settings.get('browser_proxy', '') or '').strip()
+            self.browser.start()
+        except Exception as e:
+            logger.error(f"Failed to start browser: {e}")
+            self._emit_error('BROWSER_START', f'Failed to start browser: {e}', fatal=True)
+            return
+
+        round_num = 0
+        try:
+            while True:
+                if max_rounds > 0 and round_num >= max_rounds:
+                    logger.info(f"Reached max rounds ({max_rounds}), stopping")
+                    break
+                if self.state.should_stop():
+                    logger.info("Stop flag detected, finishing")
+                    break
+
+                self.state.check_pause()
+                round_num += 1
+                self.state.current_round = round_num
+                self._emit_status()
+
+                try:
+                    self._do_one_round(round_num, max_retries, settings)
+                except Exception as e:
+                    logger.error(f"Round {round_num} failed: {e}")
+                    self.state.failed += 1
+                    self.state.completed += 1
+                    # Only restart browser if not stopping
+                    if not self.state.should_stop():
+                        try:
+                            self._restart_browser(force_close=True)
+                        except Exception:
+                            pass
+                    self._emit_status()
+
+        finally:
+            self.state.status = 'stopped'
+            try:
+                self.browser.stop()
+            except Exception:
+                pass
+            self._emit_status()
+            logger.info(f"Registration ended. Completed: {self.state.completed}, "
+                        f"Success: {self.state.success}, Failed: {self.state.failed}")
+
+    # ── Browser helpers ────────────────────────────────────────
+
+    def _refresh_active_page(self):
+        """Re-acquire the active page handle (page may disconnect after navigation)."""
+        try:
+            self.browser.refresh_active_page()
+        except Exception as e:
+            logger.warning(f"Refresh page failed: {e}, restarting browser")
+            self.browser.start()
+
+    def _restart_browser(self, force_close=False):
+        """Clear cookies/cache, optionally close and reopen browser."""
+        try:
+            page = self.browser.page
+            if page:
+                page.run_cdp('Network.clearBrowserCookies')
+                page.run_cdp('Network.clearBrowserCache')
+                for origin in ['https://accounts.x.ai', 'https://grok.com', 'https://auth.x.ai', 'https://x.ai']:
+                    try:
+                        page.run_cdp('Storage.clearDataForOrigin', origin=origin, storageTypes='all')
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        if force_close:
+            try:
+                self.browser.stop()
+            except Exception:
+                pass
+            time.sleep(1.5)
+            self.browser.start()
+            logger.info("Browser restarted (force close)")
+        else:
+            try:
+                if self.browser.browser:
+                    new_page = self.browser.browser.new_tab('about:blank')
+                    try:
+                        if self.browser.page:
+                            self.browser.page.close()
+                    except Exception:
+                        pass
+                    self.browser._page = new_page
+            except Exception:
+                pass
+            logger.info("Browser: cleared cookies, opened new tab")
+        time.sleep(1)
+
+    # ── Single round ───────────────────────────────────────────
+
+    def _do_one_round(self, round_num, max_retries, settings):
+        alias = self.db.get_next_alias(max_retries)
+        if not alias:
+            logger.error("No available aliases. Please import accounts or reset existing ones.")
+            self._emit_error('NO_ALIASES', 'No available aliases', fatal=True)
+            self.state.stop()
+            return
+
+        alias_email = alias['alias_email']
+        self.state.current_email = alias_email
+        logger.info(f"Round {round_num}: using alias {alias_email}")
+        self._emit_status()
+
+        password = self._get_password(settings)
+        reg_id = self.db.create_registration(
+            alias_id=alias['id'],
+            email=alias_email,
+            password=password,
+            round_number=round_num
+        )
+        start_time = time.time()
+
+        try:
+            # 1. Open signup page
+            self.state.check_pause()
+            logger.info("Opening registration page...")
+            self._open_signup_page()
+
+            # 2. Fill email
+            self.state.check_pause()
+            logger.info(f"Filling email: {alias_email}")
+            self._fill_email(alias_email)
+
+            # 3. Get verification code
+            self.state.check_pause()
+            logger.info("Requesting verification code...")
+            actual_email, code = self.email_mgr.get_code_with_fallback(
+                alias_email, alias['account_id'],
+                alias['client_id'], alias['refresh_token'],
+                max_retries=int(settings.get('max_code_retries', 3)),
+                on_fallback_notify=self._notify_mail_tm_switch,
+                main_email=alias.get('main_email')
+            )
+            # Update registration email if Mail.tm fallback was used
+            if actual_email != alias_email:
+                logger.info(f"Using fallback email: {actual_email}")
+                self.db.conn.execute('UPDATE registrations SET email=? WHERE id=?', (actual_email, reg_id))
+                self.db.conn.commit()
+
+            # 4. Fill code and confirm
+            self.state.check_pause()
+            logger.info(f"Filling verification code: {code}")
+            self._fill_and_confirm_code(code)
+
+            # 5. Fill profile
+            self.state.check_pause()
+            logger.info("Filling profile information...")
+            self._fill_profile(password, settings)
+
+            # 6. Extract SSO (turnstile is handled inside _fill_profile)
+            logger.info("Extracting SSO token...")
+            sso = self._extract_sso()
+
+            # Once SSO is obtained, registration is successful.
+            # Web activation / CF challenge must NEVER fail the whole round —
+            # otherwise we lose a good account and skip grok2api upload.
+            activation = None
+            if settings.get('grok_web_activation', 'true') == 'true':
+                try:
+                    logger.info('Activating Grok Web before clearing browser cookies...')
+                    activation = activate_grok_web(self.browser, sso)
+                    if activation and activation.ready:
+                        logger.info(f'Grok Web activation completed: {activation.message}')
+                    else:
+                        msg = activation.message if activation else 'no activation result'
+                        logger.warning(f'Grok Web activation incomplete (non-fatal): {msg}')
+                except Exception as act_err:
+                    logger.warning(f'Grok Web activation raised (non-fatal): {act_err}')
+                    activation = None
+
+            # 8. Extract visible numbers (optional)
+            if settings.get('extract_numbers_enabled', 'false') == 'true':
+                numbers = self._extract_visible_numbers()
+                if numbers:
+                    logger.info(f"Extracted page numbers: {numbers}")
+
+            # 9. Save results — SSO already in hand, mark success first
+            duration = time.time() - start_time
+            self.db.update_registration(reg_id, 'success', sso=sso, duration=duration)
+            self.db.update_alias_status(alias['id'], 'used', sso=sso)
+
+            try:
+                upload_result = upload_registered_sso(
+                    settings, sso, email=actual_email,
+                    user_agent=activation.user_agent if activation else '',
+                    cloudflare_cookies=activation.cloudflare_cookies if activation else '',
+                )
+                if upload_result is not None:
+                    imported = upload_result.get('import', {})
+                    converted = upload_result.get('conversion', {})
+                    logger.info(
+                        'grok2api auto pipeline completed: web_created=%s web_updated=%s '
+                        'build_created=%s linked=%s skipped=%s failed=%s',
+                        imported.get('created', 0),
+                        imported.get('updated', 0),
+                        converted.get('created', 0),
+                        converted.get('linked', 0),
+                        converted.get('skipped', 0),
+                        converted.get('failed', 0),
+                    )
+            except Exception as upload_error:
+                logger.warning(f'grok2api auto upload failed: {upload_error}')
+
+            self.state.success += 1
+            self.state.completed += 1
+            logger.info(f"Round {round_num} SUCCESS! Duration: {duration:.1f}s")
+
+            self.socketio.emit('round_complete', {
+                'round': round_num,
+                'email': alias_email,
+                'success': True,
+                'sso': sso[:50] + '...' if len(sso) > 50 else sso,
+                'duration': round(duration, 1),
+            })
+
+            # 10. Clear cookies for next round (don't close browser)
+            self._restart_browser(force_close=False)
+            self._emit_status()
+
+            # Check if account aliases are all used
+            if self.db.check_account_aliases_full(alias['account_id']):
+                self.db.update_account_status(alias['account_id'], 'done')
+                logger.info(f"Account {alias['main_email']} aliases exhausted, marked as done")
+
+        except Exception as e:
+            duration = time.time() - start_time
+            error_msg = str(e)
+            self.db.update_registration(reg_id, 'failed', error=error_msg, duration=duration)
+            self.db.increment_alias_retry(alias['id'])
+            logger.error(f"Round {round_num} FAILED: {error_msg}")
+            # Check if alias has exhausted retries
+            alias_row = self.db.conn.execute('SELECT retry_count FROM aliases WHERE id=?', (alias['id'],)).fetchone()
+            current_retries = alias_row['retry_count'] if alias_row else 0
+            if current_retries >= max_retries:
+                self.db.update_alias_status(alias['id'], 'failed', error=error_msg)
+                self.state.failed += 1
+                self.state.completed += 1
+                logger.info(f"Alias {alias_email} exhausted {max_retries} retries, marked failed")
+            else:
+                logger.info(f"Alias {alias_email} will retry ({current_retries}/{max_retries})")
+            self._emit_status()
+            # If stop was requested, just exit without restarting browser
+            if self.state.should_stop():
+                return
+            try:
+                self._restart_browser(force_close=True)
+            except Exception:
+                pass
+
+    # ── Page interaction (JS-based, matching original script) ──
+
+    def _open_signup_page(self):
+        logger.info("Refreshing active page...")
+        self._refresh_active_page()
+        logger.info(f"Navigating to {SIGNUP_URL}")
+        try:
+            self.browser.get(SIGNUP_URL)
+        except Exception as e:
+            logger.warning(f"Navigation failed, retrying: {e}")
+            self._refresh_active_page()
+            self.browser.browser.new_tab(SIGNUP_URL)
+        time.sleep(2)
+        self._wait_for_signup_ready(timeout=60)
+        self._dismiss_cookie_banner()
+        logger.info("Looking for email signup button...")
+        self._click_email_signup_button()
+
+    def _wait_for_signup_ready(self, timeout=60):
+        """Wait out Cloudflare/challenge pages before looking for signup controls."""
+        deadline = time.time() + timeout
+        last_notice = 0
+        while time.time() < deadline:
+            try:
+                state = self.browser.run_js(r"""
+const title = String(document.title || '').toLowerCase();
+const body = String((document.body && document.body.innerText) || '').toLowerCase();
+const href = String(location.href || '').toLowerCase();
+const challenge = title.includes('just a moment')
+  || body.includes('verifying you are human')
+  || body.includes('performing security verification')
+  || !!document.querySelector('#challenge-stage, script[src*="challenge-platform"]');
+const hasEmailField = !!document.querySelector('input[type="email"], input[name="email"], input[autocomplete="email"]');
+const buttons = Array.from(document.querySelectorAll('button, a, [role="button"]')).map(n =>
+  ((n.innerText || n.textContent || '') + ' ' + (n.getAttribute('aria-label') || '')).toLowerCase()
+);
+const hasEmailSignup = buttons.some(t =>
+  t.includes('使用邮箱注册')
+  || t.includes('邮箱注册')
+  || (t.includes('sign up') && t.includes('email'))
+  || t.includes('signup with email')
+  || t.includes('continue with email')
+  || t.includes('register with email')
+);
+return {challenge, href, hasEmailField, hasEmailSignup, title: document.title};
+                """) or {}
+                if state.get('challenge'):
+                    now = time.time()
+                    if now - last_notice >= 10:
+                        logger.info('Signup page is still on Cloudflare challenge, waiting...')
+                        last_notice = now
+                    time.sleep(1)
+                    continue
+                if state.get('hasEmailField') or state.get('hasEmailSignup'):
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.5)
+        logger.warning('Signup page readiness wait timed out; continuing anyway')
+        return False
+
+    def _click_email_signup_button(self, timeout=20):
+        """Click the email signup entry button after page loads.
+
+        Supports both Chinese ('使用邮箱注册') and English ('Sign up with email') UI.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                # If email field is already visible, no entry button is needed.
+                already = self.browser.run_js(r"""
+return !!document.querySelector('input[type="email"], input[name="email"], input[autocomplete="email"]');
+                """)
+                if already:
+                    logger.info('Email input already visible; skipping email signup button')
+                    return True
+
+                clicked = self.browser.run_js(r"""
+function normalize(text) {
+  return String(text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+function isEmailSignupLabel(text) {
+  const t = normalize(text).replace(/\s+/g, '');
+  if (!t) return false;
+  if (t.includes('使用邮箱注册') || t.includes('邮箱注册')) return true;
+  if (t.includes('signupwithemail') || t.includes('signupwithe-mail')) return true;
+  if (t.includes('continuewithemail') || t.includes('registerwithemail')) return true;
+  // spaced variants
+  const s = normalize(text);
+  if (s.includes('sign up with email') || s.includes('sign-up with email')) return true;
+  if (s.includes('continue with email') || s.includes('register with email')) return true;
+  if (s.includes('use email') && (s.includes('sign') || s.includes('register'))) return true;
+  return false;
+}
+const candidates = Array.from(document.querySelectorAll('button, a, [role="button"]'));
+const target = candidates.find((node) => {
+  const label = (node.innerText || node.textContent || '') + ' ' + (node.getAttribute('aria-label') || '');
+  return isEmailSignupLabel(label);
+});
+if (!target) {
+  return {
+    clicked: false,
+    labels: candidates.map(n => ((n.innerText || n.textContent || '') + ' ' + (n.getAttribute('aria-label') || '')).replace(/\s+/g, ' ').trim()).filter(Boolean).slice(0, 12)
+  };
+}
+try { target.scrollIntoView({block: 'center'}); } catch (e) {}
+target.click();
+return {clicked: true, label: (target.innerText || target.textContent || '').replace(/\s+/g, ' ').trim()};
+                """) or {}
+                if isinstance(clicked, dict) and clicked.get('clicked'):
+                    logger.info("Clicked email signup button: %s", clicked.get('label') or '')
+                    return True
+                if isinstance(clicked, dict) and clicked.get('labels'):
+                    logger.debug('Email signup button candidates: %s', clicked.get('labels'))
+            except Exception:
+                pass
+            # Cookie banners can cover the entry button on English UI.
+            self._dismiss_cookie_banner()
+            time.sleep(0.5)
+        raise Exception('未找到邮箱注册入口按钮（支持：使用邮箱注册 / Sign up with email）')
+
+    def _fill_email(self, email_addr, timeout=15):
+        """Fill email using JS (React-compatible)."""
+        logger.info(f"Filling email via JS: {email_addr}")
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                filled = self.browser.run_js(
+                    """
+const email = arguments[0];
+function isVisible(node) {
+    if (!node) return false;
+    const style = window.getComputedStyle(node);
+    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+    const rect = node.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+}
+const input = Array.from(document.querySelectorAll(
+    'input[data-testid="email"], input[name="email"], input[type="email"], input[autocomplete="email"]'
+)).find(n => isVisible(n) && !n.disabled && !n.readOnly) || null;
+if (!input) return 'not-ready';
+input.focus();
+input.click();
+const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+const tracker = input._valueTracker;
+if (tracker) tracker.setValue('');
+if (valueSetter) valueSetter.call(input, email);
+else input.value = email;
+input.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, data: email, inputType: 'insertText' }));
+input.dispatchEvent(new InputEvent('input', { bubbles: true, data: email, inputType: 'insertText' }));
+input.dispatchEvent(new Event('change', { bubbles: true }));
+if ((input.value || '').trim() !== email || !input.checkValidity()) return false;
+input.blur();
+return 'filled';
+                    """,
+                    email_addr,
+                )
+
+                if filled == 'not-ready':
+                    time.sleep(0.5)
+                    continue
+
+                if filled == 'filled':
+                    time.sleep(0.8)
+                    # Click submit/register button
+                    clicked = self.browser.run_js(r"""
+function isVisible(node) {
+    if (!node) return false;
+    const style = window.getComputedStyle(node);
+    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+    const rect = node.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+}
+function normalize(text) {
+    return String(text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+function isEmailSubmitLabel(text) {
+    const s = normalize(text);
+    const t = s.replace(/\s+/g, '');
+    if (!t) return false;
+    // Chinese
+    if (t === '注册' || t.includes('注册') || t.includes('继续') || t.includes('下一步')) return true;
+    // English
+    if (t === 'signup' || t === 'sign-up' || t === 'continue' || t === 'next' || t === 'submit') return true;
+    if (s === 'sign up' || s === 'sign-up' || s.includes('continue') || s.includes('next')) return true;
+    // Avoid social/oauth/cookie buttons
+    if (s.includes('google') || s.includes('apple') || s.includes(' cookie') || s.includes('reject') || s.includes('accept all')) return false;
+    return false;
+}
+const input = Array.from(document.querySelectorAll(
+    'input[data-testid="email"], input[name="email"], input[type="email"], input[autocomplete="email"]'
+)).find(n => isVisible(n) && !n.disabled && !n.readOnly) || null;
+if (!input || !input.checkValidity() || !(input.value || '').trim()) return {ok:false, reason:'invalid-email'};
+const buttons = Array.from(document.querySelectorAll('button[type="submit"], button')).filter(n =>
+    isVisible(n) && !n.disabled && n.getAttribute('aria-disabled') !== 'true'
+);
+// Prefer exact primary action near the form.
+let submitButton = buttons.find(n => {
+    const text = n.innerText || n.textContent || '';
+    const t = normalize(text).replace(/\s+/g, '');
+    return t === 'signup' || t === 'sign-up' || t === '注册';
+});
+if (!submitButton) {
+    submitButton = buttons.find(n => isEmailSubmitLabel(n.innerText || n.textContent || ''));
+}
+if (!submitButton) {
+    // Fallback: first enabled submit button that is not cookie-related.
+    submitButton = buttons.find(n => n.type === 'submit' && !/cookie|reject|accept|allow|confirm my choices/i.test(n.innerText || ''));
+}
+if (!submitButton || submitButton.disabled) {
+    return {ok:false, reason:'no-submit', labels: buttons.map(n => (n.innerText||'').trim()).filter(Boolean).slice(0,10)};
+}
+try { submitButton.scrollIntoView({block:'center'}); } catch (e) {}
+submitButton.click();
+return {ok:true, label:(submitButton.innerText || submitButton.textContent || '').replace(/\s+/g,' ').trim()};
+                    """)
+                    if isinstance(clicked, dict) and clicked.get('ok'):
+                        logger.info(
+                            "Filled email and clicked submit (%s): %s",
+                            clicked.get('label') or 'submit',
+                            email_addr,
+                        )
+                        return
+                    if isinstance(clicked, dict) and clicked.get('labels'):
+                        logger.debug('Email submit candidates: %s', clicked.get('labels'))
+                    elif clicked is True:
+                        logger.info(f"Filled email and clicked submit: {email_addr}")
+                        return
+
+            except Exception:
+                pass
+            time.sleep(0.5)
+
+        raise Exception("Failed to fill email or find submit button")
+
+    def _fill_and_confirm_code(self, code, timeout=180):
+        """Fill verification code and confirm, with multiple retry strategies."""
+        deadline = time.time() + timeout
+
+        while time.time() < deadline:
+            try:
+                filled = self.browser.run_js(
+                    """
+const code = String(arguments[0] || '').trim();
+function isVisible(node) {
+    if (!node) return false;
+    const style = window.getComputedStyle(node);
+    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+    const rect = node.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+}
+function setNativeValue(input, value) {
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+    const tracker = input._valueTracker;
+    if (tracker) tracker.setValue('');
+    if (setter) { setter.call(input, ''); setter.call(input, value); }
+    else { input.value = ''; input.value = value; }
+}
+function dispatchInputEvents(input, value) {
+    input.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, data: value, inputType: 'insertText' }));
+    input.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, data: value, inputType: 'insertText' }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+const input = Array.from(document.querySelectorAll(
+    'input[data-input-otp="true"], input[name="code"], input[autocomplete="one-time-code"], input[inputmode="numeric"], input[inputmode="text"]'
+)).find(n => isVisible(n) && !n.disabled && !n.readOnly && Number(n.maxLength || code.length || 6) > 1) || null;
+
+const otpBoxes = Array.from(document.querySelectorAll('input')).filter(n => {
+    if (!isVisible(n) || n.disabled || n.readOnly) return false;
+    const maxLength = Number(n.maxLength || 0);
+    const autocomplete = String(n.autocomplete || '').toLowerCase();
+    return maxLength === 1 || autocomplete === 'one-time-code';
+});
+
+if (!input && otpBoxes.length < code.length) return 'not-ready';
+
+if (input) {
+    input.focus();
+    input.click();
+    setNativeValue(input, code);
+    dispatchInputEvents(input, code);
+    const normalizedValue = String(input.value || '').trim();
+    if (normalizedValue !== code) {
+        if (otpBoxes.length >= code.length) {
+            const orderedBoxes = otpBoxes.slice(0, code.length);
+            for (let i = 0; i < orderedBoxes.length; i++) {
+                const box = orderedBoxes[i];
+                box.focus(); box.click();
+                setNativeValue(box, code[i] || '');
+                dispatchInputEvents(box, code[i] || '');
+                box.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: code[i] }));
+                box.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: code[i] }));
+                box.blur();
+            }
+            return orderedBoxes.map(n => String(n.value || '').trim()).join('') === code ? 'filled' : 'box-mismatch';
+        }
+        return 'aggregate-mismatch';
+    }
+    input.blur();
+    return 'filled';
+}
+
+const orderedBoxes = otpBoxes.slice(0, code.length);
+for (let i = 0; i < orderedBoxes.length; i++) {
+    const box = orderedBoxes[i];
+    box.focus(); box.click();
+    setNativeValue(box, code[i] || '');
+    dispatchInputEvents(box, code[i] || '');
+    box.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: code[i] }));
+    box.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: code[i] }));
+    box.blur();
+}
+return orderedBoxes.map(n => String(n.value || '').trim()).join('') === code ? 'filled' : 'box-mismatch';
+                    """,
+                    code,
+                )
+            except PageDisconnectedError:
+                # Page navigated after confirmation, handle like original
+                self._refresh_active_page()
+                if self._has_profile_form():
+                    logger.info("Page navigated after code submission, profile form detected")
+                    return
+                time.sleep(1)
+                continue
+            except Exception as e:
+                logger.warning(f"Code fill error: {e}")
+                time.sleep(1)
+                continue
+
+            if filled == 'not-ready':
+                if self._has_profile_form():
+                    logger.info("Already on profile page, skipping code confirmation")
+                    return
+                time.sleep(0.5)
+                continue
+
+            if filled == 'filled':
+                time.sleep(1.2)
+                # Click confirm button
+                try:
+                    clicked = self.browser.run_js(r"""
+function isVisible(node) {
+    if (!node) return false;
+    const style = window.getComputedStyle(node);
+    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+    const rect = node.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+}
+const aggregateInput = Array.from(document.querySelectorAll(
+    'input[data-input-otp="true"], input[name="code"], input[autocomplete="one-time-code"], input[inputmode="numeric"], input[inputmode="text"]'
+)).find(n => isVisible(n) && !n.disabled && !n.readOnly && Number(n.maxLength || 0) > 1) || null;
+let value = '';
+if (aggregateInput) {
+    value = String(aggregateInput.value || '').trim();
+    if (!value) return false;
+} else {
+    const otpBoxes = Array.from(document.querySelectorAll('input')).filter(n => {
+        if (!isVisible(n) || n.disabled || n.readOnly) return false;
+        return Number(n.maxLength || 0) === 1 || String(n.autocomplete || '').toLowerCase() === 'one-time-code';
+    });
+    value = otpBoxes.map(n => String(n.value || '').trim()).join('');
+    if (!value || value.length < 6) return false;
+}
+const buttons = Array.from(document.querySelectorAll('button[type="submit"], button')).filter(n =>
+    isVisible(n) && !n.disabled && n.getAttribute('aria-disabled') !== 'true'
+);
+const confirmButton = buttons.find(n => {
+    const raw = (n.innerText || n.textContent || '');
+    const compact = raw.replace(/\s+/g, '');
+    const lower = raw.replace(/\s+/g, ' ').trim().toLowerCase();
+    return compact === '确认邮箱' || compact.includes('确认邮箱')
+        || compact === '继续' || compact.includes('继续')
+        || compact === '下一步' || compact.includes('下一步')
+        || lower === 'confirm email' || lower.includes('confirm email')
+        || lower === 'continue' || lower === 'next' || lower === 'verify';
+});
+if (!confirmButton) return 'no-button';
+confirmButton.focus();
+confirmButton.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true}));
+confirmButton.dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true}));
+confirmButton.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+confirmButton.click();
+return 'clicked';
+                    """)
+                except PageDisconnectedError:
+                    # Page navigated after click, like original
+                    self._refresh_active_page()
+                    if self._has_profile_form():
+                        logger.info("Profile form detected after confirm click")
+                        return
+                    clicked = 'disconnected'
+                except Exception as e:
+                    logger.warning(f"Confirm button error: {e}")
+                    clicked = 'error'
+
+                if clicked == 'clicked':
+                    logger.info(f"Filled code and clicked confirm: {code}")
+                    # Wait for page transition (up to 15s)
+                    old_url = self.browser.page.url if self.browser.page else ''
+                    for _ in range(30):
+                        time.sleep(0.5)
+                        try:
+                            if self._has_profile_form():
+                                logger.info("Profile page ready after code confirmation")
+                                return
+                            new_url = self.browser.page.url if self.browser.page else ''
+                            if new_url != old_url:
+                                logger.info(f"Page navigated: {new_url}")
+                                return
+                        except Exception:
+                            pass
+
+                    # Page didn't change, try Enter key
+                    logger.info("Page unchanged, trying Enter key...")
+                    try:
+                        self.browser.run_js(r"""
+const otpInput = document.querySelector('input[data-input-otp="true"]') ||
+    Array.from(document.querySelectorAll('input')).find(n => n.maxLength > 5 && n.type !== 'password');
+if (otpInput) {
+    otpInput.focus();
+    otpInput.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true}));
+    otpInput.dispatchEvent(new KeyboardEvent('keyup', {key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true}));
+}
+const form = document.querySelector('form');
+if (form) form.dispatchEvent(new Event('submit', {bubbles: true, cancelable: true}));
+                        """)
+                    except Exception:
+                        pass
+                    time.sleep(3)
+
+                    # Still no change, click button again
+                    if not self._has_profile_form():
+                        logger.info("Enter had no effect, clicking button again...")
+                        try:
+                            self.browser.run_js(r"""
+const btns = Array.from(document.querySelectorAll('button')).filter(n => {
+    const raw = (n.innerText || '');
+    const t = raw.replace(/\s+/g, '');
+    const lower = raw.replace(/\s+/g, ' ').trim().toLowerCase();
+    return t.includes('确认邮箱') || t.includes('继续') || t.includes('下一步')
+        || lower.includes('confirm email') || lower === 'continue' || lower === 'next' || lower === 'verify';
+});
+if (btns.length) {
+    btns[0].scrollIntoView({block: 'center'});
+    btns[0].focus();
+    btns[0].click();
+}
+                            """)
+                        except Exception:
+                            pass
+                        time.sleep(3)
+
+                    if self._has_profile_form():
+                        logger.info("Profile page ready after retry")
+                        return
+
+                    raise Exception("确认邮箱失败，页面无响应，需要关闭浏览器重试")
+
+                if clicked == 'no-button':
+                    current_url = self.browser.page.url if self.browser.page else ''
+                    if 'sign-up' in current_url or 'signup' in current_url:
+                        logger.info(f"Code filled, page auto-navigated: {current_url}")
+                        return
+
+                if clicked == 'disconnected':
+                    time.sleep(1)
+                    continue
+
+                if clicked == 'error':
+                    time.sleep(1)
+                    continue
+
+            time.sleep(0.5)
+
+        # Timeout: dump DOM for debugging
+        try:
+            snapshot = self.browser.run_js(r"""
+function isVisible(node) {
+    if (!node) return false;
+    const style = window.getComputedStyle(node);
+    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+    const rect = node.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+}
+const inputs = Array.from(document.querySelectorAll('input')).filter(isVisible).map(n => ({
+    type: n.type || '', name: n.name || '', maxLength: Number(n.maxLength || 0), value: String(n.value || ''),
+}));
+const buttons = Array.from(document.querySelectorAll('button')).filter(isVisible).map(n => ({
+    text: String(n.innerText || n.textContent || '').replace(/\s+/g, ' ').trim(), disabled: !!n.disabled,
+}));
+return { url: location.href, inputs, buttons };
+            """)
+            logger.error(f"Code confirm timeout, DOM snapshot: {snapshot}")
+        except Exception:
+            pass
+        raise Exception("Failed to fill/confirm verification code")
+
+    def _has_profile_form(self):
+        """Check if we're on the final profile registration page."""
+        try:
+            self._refresh_active_page()
+            return bool(self.browser.run_js(
+                """
+const givenInput = document.querySelector('input[data-testid="givenName"], input[name="givenName"], input[autocomplete="given-name"]');
+const familyInput = document.querySelector('input[data-testid="familyName"], input[name="familyName"], input[autocomplete="family-name"]');
+const passwordInput = document.querySelector('input[data-testid="password"], input[name="password"], input[type="password"]');
+return !!(givenInput && familyInput && passwordInput);
+                """
+            ))
+        except Exception:
+            return False
+
+    def _dismiss_cookie_banner(self):
+        """Dismiss OneTrust/cookie consent banners that block form submit."""
+        try:
+            result = self.browser.run_js(r"""
+// Prefer known OneTrust / common consent selectors first
+const selectors = [
+  '#onetrust-accept-btn-handler',
+  '#accept-recommended-btn-handler',
+  'button#onetrust-accept-btn-handler',
+  '.onetrust-accept-btn-handler',
+  '#onetrust-pc-btn-handler',
+  'button[id*="accept"]',
+  'button[class*="accept-all"]',
+  'button[class*="acceptAll"]',
+];
+for (const sel of selectors) {
+  const el = document.querySelector(sel);
+  if (el) {
+    try { el.click(); return 'clicked-sel:' + sel; } catch (e) {}
+  }
+}
+const labels = ['全部允许', '全部接受', '接受全部', '允许全部', 'Accept All', 'Allow All', 'Allow all', 'I Accept', 'Agree', 'Accept'];
+const buttons = Array.from(document.querySelectorAll('button, [role="button"], a, input[type="button"], input[type="submit"]'));
+const matches = buttons.map(n => {
+  const t = (n.innerText || n.textContent || n.value || n.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+  return { t, d: !!n.disabled, match: labels.some(l => t === l || t.includes(l)) };
+}).filter(x => x.match);
+const btn = buttons.find(n => {
+  if (!n || n.disabled) return false;
+  const t = (n.innerText || n.textContent || n.value || n.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+  return labels.some(l => t === l || t.includes(l));
+});
+if (!btn) {
+  // Last resort: remove overlay containers so they stop blocking pointer events
+  ['#onetrust-consent-sdk', '#onetrust-banner-sdk', '#onetrust-pc-sdk', '.onetrust-pc-dark-filter'].forEach(sel => {
+    document.querySelectorAll(sel).forEach(n => n.remove());
+  });
+  return matches.length ? ('found-but-not-clicked:' + JSON.stringify(matches.slice(0, 5))) : 'none';
+}
+try {
+  btn.scrollIntoView({ block: 'center' });
+  btn.focus();
+  btn.click();
+  btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+} catch (e) {
+  return 'error:' + String(e);
+}
+// Hide remaining overlays if still present
+['#onetrust-consent-sdk', '#onetrust-banner-sdk', '.onetrust-pc-dark-filter'].forEach(sel => {
+  document.querySelectorAll(sel).forEach(n => { n.style.display = 'none'; n.remove(); });
+});
+return 'clicked-text:' + (btn.innerText || btn.value || '').trim().slice(0, 40);
+            """)
+            if result and str(result).startswith('clicked'):
+                logger.info(f"Cookie banner dismissed: {result}")
+                time.sleep(1.0)
+                return True
+            # DrissionPage fallback by visible text
+            for label in ('全部允许', 'Accept All', 'Allow All'):
+                try:
+                    el = self.browser.page.ele(f'tag:button@@text()={label}', timeout=0.5)
+                    if el:
+                        el.click()
+                        logger.info(f"Cookie banner dismissed via DP: {label}")
+                        time.sleep(1.0)
+                        return True
+                except Exception:
+                    pass
+            if result and result != 'none':
+                logger.info(f"Cookie banner result: {result}")
+            else:
+                logger.debug(f"Cookie banner result: {result}")
+        except Exception as e:
+            logger.warning(f"Cookie banner check: {e}")
+        return False
+
+    def _fill_profile(self, password, settings, timeout=120):
+        """Fill profile form (name + password) and submit with turnstile handling."""
+        if settings.get('random_name_enabled', 'true') == 'true':
+            first, last = self._generate_random_name()
+        else:
+            first, last = 'Test', 'User'
+
+        deadline = time.time() + timeout
+        self._dismiss_cookie_banner()
+
+        while time.time() < deadline:
+            try:
+                self._dismiss_cookie_banner()
+                filled = self.browser.run_js(
+                    """
+const givenName = arguments[0];
+const familyName = arguments[1];
+const password = arguments[2];
+function isVisible(node) {
+    if (!node) return false;
+    const style = window.getComputedStyle(node);
+    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+    const rect = node.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+}
+function pickInput(selector) {
+    return Array.from(document.querySelectorAll(selector)).find(n => isVisible(n) && !n.disabled && !n.readOnly) || null;
+}
+function setInputValue(input, value) {
+    if (!input) return false;
+    input.focus(); input.click();
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+    const tracker = input._valueTracker;
+    if (tracker) tracker.setValue('');
+    if (setter) { setter.call(input, ''); setter.call(input, value); }
+    else { input.value = ''; input.value = value; }
+    input.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, data: value, inputType: 'insertText' }));
+    input.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, data: value, inputType: 'insertText' }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    input.dispatchEvent(new Event('blur', { bubbles: true }));
+    return String(input.value || '') === String(value || '');
+}
+
+const givenInput = pickInput('input[data-testid="givenName"], input[name="givenName"], input[autocomplete="given-name"]');
+const familyInput = pickInput('input[data-testid="familyName"], input[name="familyName"], input[autocomplete="family-name"]');
+const passwordInput = pickInput('input[data-testid="password"], input[name="password"], input[type="password"]');
+if (!givenInput || !familyInput || !passwordInput) return 'not-ready';
+
+const givenOk = setInputValue(givenInput, givenName);
+const familyOk = setInputValue(familyInput, familyName);
+const passwordOk = setInputValue(passwordInput, password);
+if (!givenOk || !familyOk || !passwordOk) return 'filled-failed';
+
+return [
+    String(givenInput.value || '').trim() === String(givenName || '').trim(),
+    String(familyInput.value || '').trim() === String(familyName || '').trim(),
+    String(passwordInput.value || '') === String(password || ''),
+].every(Boolean) ? 'filled' : 'verify-failed';
+                    """,
+                    first, last, password,
+                )
+
+                if filled == 'not-ready':
+                    time.sleep(0.5)
+                    continue
+
+                if filled == 'filled':
+                    # Verify values
+                    values_ok = self.browser.run_js(
+                        """
+const expectedGiven = arguments[0];
+const expectedFamily = arguments[1];
+const expectedPassword = arguments[2];
+function isVisible(node) {
+    if (!node) return false;
+    const style = window.getComputedStyle(node);
+    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+    const rect = node.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+}
+function pickInput(selector) {
+    return Array.from(document.querySelectorAll(selector)).find(n => isVisible(n) && !n.disabled && !n.readOnly) || null;
+}
+const givenInput = pickInput('input[data-testid="givenName"], input[name="givenName"], input[autocomplete="given-name"]');
+const familyInput = pickInput('input[data-testid="familyName"], input[name="familyName"], input[autocomplete="family-name"]');
+const passwordInput = pickInput('input[data-testid="password"], input[name="password"], input[type="password"]');
+if (!givenInput || !familyInput || !passwordInput) return false;
+return String(givenInput.value || '').trim() === String(expectedGiven || '').trim()
+    && String(familyInput.value || '').trim() === String(expectedFamily || '').trim()
+    && String(passwordInput.value || '') === String(expectedPassword || '');
+                        """,
+                        first, last, password,
+                    )
+                    if not values_ok:
+                        logger.debug("Profile field values mismatch, retrying...")
+                        time.sleep(0.5)
+                        continue
+
+                    # Check turnstile BEFORE clicking submit (like original script)
+                    turnstile_state = self.browser.run_js("""
+const ci = document.querySelector('input[name="cf-turnstile-response"]');
+if (!ci) return 'not-found';
+const v = String(ci.value || '').trim();
+return v ? 'ready' : 'pending';
+                    """)
+
+                    if turnstile_state == 'pending':
+                        logger.info("Turnstile pending on profile page, solving...")
+                        self._solve_turnstile()
+                        # Sync token to input if we got it
+                        turnstile_token = self.browser.run_js("""
+try { return turnstile.getResponse() } catch(e) { return null }
+                        """)
+                        if turnstile_token and len(str(turnstile_token)) > 50:
+                            self.browser.run_js("""
+const token = arguments[0];
+const ci = document.querySelector('input[name="cf-turnstile-response"]');
+if (ci) {
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+    if (setter) setter.call(ci, token); else ci.value = token;
+    ci.dispatchEvent(new Event('input', { bubbles: true }));
+    ci.dispatchEvent(new Event('change', { bubbles: true }));
+}
+                            """, turnstile_token)
+                            logger.info(f"Turnstile token synced to form (len={len(str(turnstile_token))})")
+                        else:
+                            logger.warning(f"Turnstile token missing/short: {str(turnstile_token)[:40] if turnstile_token else None}")
+                        # Give React form a moment to enable submit after CF callback
+                        time.sleep(1.5)
+
+                    self._dismiss_cookie_banner()
+
+                    # Wait until 完成注册 is enabled (do NOT click a disabled button)
+                    enabled_btn = False
+                    for _wait in range(20):
+                        state = self.browser.run_js(r"""
+function isVisible(node) {
+    if (!node) return false;
+    const style = window.getComputedStyle(node);
+    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+    const rect = node.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+}
+function isSubmitLabel(text) {
+    const raw = String(text || '');
+    const t = raw.replace(/\s+/g, '').toLowerCase();
+    const s = raw.replace(/\s+/g, ' ').trim().toLowerCase();
+    return t.includes('完成注册') || t === 'signup' || t.includes('createaccount')
+        || t.includes('sign-up') || t.includes('completesignup')
+        || s === 'complete sign up' || s.includes('complete sign up')
+        || s === 'create account' || s.includes('create account')
+        || (t.includes('注册') && t.includes('完成'));
+}
+const buttons = Array.from(document.querySelectorAll('button[type="submit"], button'));
+const candidates = buttons.filter(n => isVisible(n) && isSubmitLabel(n.innerText || n.textContent || ''));
+if (!candidates.length) return 'missing';
+const enabled = candidates.find(n => !n.disabled && n.getAttribute('aria-disabled') !== 'true');
+return enabled ? 'enabled' : 'disabled';
+                        """)
+                        if state == 'enabled':
+                            enabled_btn = True
+                            break
+                        if _wait in (0, 5, 10, 15):
+                            logger.info(f"Waiting for submit button enabled... state={state}")
+                            self._dismiss_cookie_banner()
+                            # Re-try turnstile interaction if still disabled
+                            try:
+                                self._solve_turnstile()
+                            except Exception:
+                                pass
+                        time.sleep(1)
+
+                    if not enabled_btn:
+                        logger.warning("Submit button still disabled after wait; attempting one more force path")
+
+                    # Click submit — match Chinese/English labels; never treat disabled click as success
+                    clicked = self.browser.run_js(r"""
+function isVisible(node) {
+    if (!node) return false;
+    const style = window.getComputedStyle(node);
+    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+    const rect = node.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+}
+function isSubmitLabel(text) {
+    const raw = String(text || '');
+    const t = raw.replace(/\s+/g, '').toLowerCase();
+    const s = raw.replace(/\s+/g, ' ').trim().toLowerCase();
+    return t === '完成注册' || t.includes('完成注册')
+        || t === 'signup' || t === 'sign-up' || t === 'createaccount'
+        || t.includes('createaccount') || t.includes('sign-up')
+        || t.includes('completesignup')
+        || s === 'complete sign up' || s.includes('complete sign up')
+        || s === 'create account' || s.includes('create account')
+        || (t.includes('注册') && t.includes('完成'));
+}
+const ci = document.querySelector('input[name="cf-turnstile-response"]');
+const hasCF = !!(ci && String(ci.value || '').trim().length > 50);
+const buttons = Array.from(document.querySelectorAll('button[type="submit"], button'));
+const candidates = buttons.filter(n => isVisible(n) && isSubmitLabel(n.innerText || n.textContent || ''));
+let btn = candidates.find(n => !n.disabled && n.getAttribute('aria-disabled') !== 'true') || null;
+// Remove cookie overlays that intercept clicks
+['#onetrust-consent-sdk', '#onetrust-banner-sdk', '#onetrust-pc-sdk', '.onetrust-pc-dark-filter'].forEach(sel => {
+    document.querySelectorAll(sel).forEach(n => n.remove());
+});
+if (!btn) {
+    // If still disabled but CF token present, force-enable for submit
+    const anySubmit = candidates[0];
+    if (anySubmit && hasCF) {
+        anySubmit.disabled = false;
+        anySubmit.removeAttribute('disabled');
+        anySubmit.setAttribute('aria-disabled', 'false');
+        btn = anySubmit;
+    }
+}
+if (!btn) {
+    const labels = buttons.filter(isVisible).map(n => ({
+        t: (n.innerText||'').trim().slice(0,40),
+        d: !!n.disabled
+    }));
+    return 'no-enabled-button:' + JSON.stringify(labels.slice(0, 8));
+}
+btn.scrollIntoView({ block: 'center', inline: 'center' });
+btn.focus();
+// One native click is enough for React's delegated handler. Dispatching synthetic
+// clicks and requestSubmit as well can send the same registration several times.
+btn.click();
+return hasCF ? 'clicked-cf' : 'clicked-no-cf';
+                    """)
+                    logger.info(f"Profile submit result: {clicked}")
+                    if not clicked or str(clicked).startswith('no-button') or str(clicked).startswith('disabled'):
+                        # Fallback: try DrissionPage by text
+                        for label in ('完成注册', 'Complete sign up', 'Sign up', 'Create account', 'Continue'):
+                            try:
+                                submit_btn = self.browser.page.ele(f'tag:button@@text()={label}', timeout=1)
+                                if submit_btn:
+                                    submit_btn.click()
+                                    clicked = f'clicked-dp:{label}'
+                                    break
+                            except Exception:
+                                pass
+                    if not clicked or str(clicked).startswith('no-button') or str(clicked).startswith('disabled') or str(clicked).startswith('no-enabled-button'):
+                        # Last resort: CDP click any submit-like button
+                        try:
+                            self.browser.run_js(r"""
+const labels = ['完成注册','Complete sign up','Sign up','Create account','Continue','注册'];
+const btns = Array.from(document.querySelectorAll('button'));
+const b = btns.find(n => {
+    const t = (n.innerText||n.textContent||'');
+    return labels.some(l => t.includes(l));
+});
+if (b) {
+    b.dispatchEvent(new MouseEvent('click', {bubbles:true,cancelable:true,view:window}));
+    b.click();
+}
+                            """)
+                            clicked = 'clicked-last-resort'
+                        except Exception:
+                            pass
+
+                    if clicked == 'clicked-no-cf':
+                        logger.info("Submit clicked without CF token (turnstile may have timed out)")
+                    elif str(clicked).startswith('no-button') or str(clicked).startswith('disabled'):
+                        logger.warning(f"Submit button issue: {clicked}")
+
+                    logger.info(f"Filled profile: {first} {last}")
+
+                    def _submit_ui_state():
+                        """Detect post-submit loading / success / error on the profile page."""
+                        return self.browser.run_js(r"""
+function isVisible(node) {
+  if (!node) return false;
+  const style = window.getComputedStyle(node);
+  if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+  const rect = node.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0;
+}
+const buttons = Array.from(document.querySelectorAll('button'));
+const primary = buttons.find(n => {
+  if (!isVisible(n)) return false;
+  const raw = (n.innerText || n.textContent || '');
+  const t = raw.replace(/\s+/g, '').toLowerCase();
+  const s = raw.replace(/\s+/g, ' ').trim().toLowerCase();
+  return t.includes('完成注册') || t === 'signup' || t.includes('createaccount')
+    || t.includes('sign-up') || t.includes('completesignup')
+    || s.includes('complete sign up') || s.includes('create account');
+}) || buttons.find(n => isVisible(n) && n.type === 'submit') || null;
+
+const hasSpinner = !!(primary && primary.querySelector(
+  'svg.animate-spin, [class*="spinner"], [class*="loading"], .animate-spin'
+));
+const ariaBusy = !!(primary && (primary.getAttribute('aria-busy') === 'true' || primary.dataset.loading === 'true'));
+const primaryDisabled = !!(primary && (primary.disabled || primary.getAttribute('aria-disabled') === 'true'));
+const primaryText = primary ? (primary.innerText || primary.textContent || '').replace(/\s+/g, ' ').trim() : '';
+// This probe runs only after clicking submit. A disabled primary button therefore means
+// the form still owns an in-flight submission, even if the original label remains visible.
+const loading = hasSpinner || ariaBusy || primaryDisabled;
+const err = document.querySelector('[role="alert"], .error, [data-testid="error-message"], .text-red-500, .text-error');
+const errText = err ? (err.innerText || err.textContent || '').trim().substring(0, 200) : '';
+const cf = document.querySelector('input[name="cf-turnstile-response"]');
+return {
+  loading: !!loading,
+  primaryDisabled: !!primaryDisabled,
+  primaryText: primaryText.slice(0, 40),
+  errText: errText,
+  url: location.href,
+  cfLen: cf ? String(cf.value || '').length : -1,
+  turnstileOk: !!(document.body && document.body.innerText && document.body.innerText.indexOf('成功') >= 0),
+};
+                        """)
+
+                    # Wait much longer after submit. If the button is spinning ("loading"),
+                    # the request is in-flight — do NOT reload (that aborts registration).
+                    wait_started = time.time()
+                    wait_deadline = wait_started + 90
+                    loading_deadline_extended = False
+                    saw_loading = False
+                    last_state_log = 0
+                    while time.time() < wait_deadline:
+                        if self.state.should_stop():
+                            raise Exception("Registration stop requested during submit wait")
+                        try:
+                            url = self.browser.page.url
+                            if 'sign-up' not in url and 'signup' not in url:
+                                logger.info(f"Registration submitted, page: {url}")
+                                return
+                        except Exception:
+                            pass
+                        try:
+                            sso_early = self._check_sso_cookie()
+                            if sso_early:
+                                logger.info(f"SSO cookie detected early ({len(sso_early)} chars)")
+                                return
+                        except Exception:
+                            pass
+
+                        try:
+                            ui = _submit_ui_state() or {}
+                        except Exception:
+                            ui = {}
+                        in_flight = submit_is_in_flight(ui)
+                        if in_flight:
+                            saw_loading = True
+                            if not loading_deadline_extended:
+                                wait_deadline = wait_started + 180
+                                loading_deadline_extended = True
+                                logger.info("Submit is loading; extending wait to 180s and keeping page untouched")
+                        if ui.get('errText'):
+                            raise Exception(f"注册提交失败: {ui['errText']}")
+
+                        now = time.time()
+                        if now - last_state_log >= 5:
+                            last_state_log = now
+                            logger.info(
+                                f"Post-submit wait: loading={in_flight} "
+                                f"btn='{ui.get('primaryText')}' disabled={ui.get('primaryDisabled')} "
+                                f"cfLen={ui.get('cfLen')} turnstileOk={ui.get('turnstileOk')}"
+                            )
+
+                        # If we previously saw loading and it finished, give a short grace period then exit loop
+                        if saw_loading and not in_flight and now - wait_started >= 20:
+                            # loading ended without navigation — small extra wait for redirect/cookie
+                            time.sleep(3)
+                            try:
+                                url = self.browser.page.url
+                                if 'sign-up' not in url and 'signup' not in url:
+                                    logger.info(f"Registration submitted after loading, page: {url}")
+                                    return
+                            except Exception:
+                                pass
+                            try:
+                                sso_early = self._check_sso_cookie()
+                                if sso_early:
+                                    logger.info(f"SSO cookie after loading end ({len(sso_early)} chars)")
+                                    return
+                            except Exception:
+                                pass
+                            break
+
+                        time.sleep(1)
+
+                    # Diagnostics (never reload while still loading — that kills the API call)
+                    try:
+                        ui = _submit_ui_state() or {}
+                        logger.warning(f"Submit diagnostics: {ui}")
+                    except Exception as e:
+                        ui = {}
+                        logger.warning(f"Submit diagnostics failed: {e}")
+
+                    if submit_is_in_flight(ui):
+                        # Still spinning after the extended deadline — leave page alone and
+                        # propagate the failure; never loop back into another click attempt.
+                        logger.warning("Submit still loading after 180s; not reloading (would abort request)")
+                        raise Exception("注册提交超时（按钮一直 loading），需要重新尝试")
+
+                    if ui.get('errText'):
+                        raise Exception(f"注册提交失败: {ui['errText']}")
+
+                    # Only soft-refresh if request clearly finished and still stuck on sign-up
+                    logger.info("No navigation after submit (not loading); soft check only, no forced reload")
+                    try:
+                        sso_after = self._check_sso_cookie()
+                        if sso_after:
+                            logger.info(f"SSO cookie found without navigation ({len(sso_after)} chars)")
+                            return
+                    except Exception:
+                        pass
+
+                    logger.warning("Submission appears to have failed (no navigation, no SSO, not loading).")
+                    raise Exception("注册提交未生效（页面未跳转且无SSO），需要重新尝试")
+
+            except Exception as e:
+                # Re-raise real submit failures instead of looping until timeout
+                msg = str(e)
+                if any(k in msg for k in ('注册提交失败', '注册提交未生效', '注册提交超时', 'Turnstile')):
+                    raise
+            time.sleep(0.5)
+
+        raise Exception("未找到最终注册表单或完成注册按钮")
+
+    def _solve_turnstile(self):
+        """Solve Turnstile challenge using JS interaction."""
+        settings = self.db.get_settings()
+        if settings.get('turnstile_auto', 'true') != 'true':
+            logger.info("Turnstile set to manual, waiting for user...")
+            time.sleep(30)
+            return
+
+        try:
+            # Check if turnstile exists
+            turnstile_state = self.browser.run_js("""
+const ci = document.querySelector('input[name="cf-turnstile-response"]');
+if (!ci) return 'not-found';
+const v = String(ci.value || '').trim();
+return v ? 'ready' : 'pending';
+            """)
+
+            if turnstile_state == 'not-found':
+                logger.debug("No Turnstile detected")
+                return
+
+            if turnstile_state == 'ready':
+                logger.info("Turnstile already solved")
+                return
+
+            logger.info("Turnstile detected, attempting solve...")
+            # Try to interact with turnstile iframe
+            for i in range(15):
+                try:
+                    turnstile_response = self.browser.run_js("try { return turnstile.getResponse() } catch(e) { return null }")
+                    if turnstile_response:
+                        logger.info("Turnstile solved via getResponse()")
+                        # Sync token to input
+                        self.browser.run_js("""
+const token = arguments[0];
+const ci = document.querySelector('input[name="cf-turnstile-response"]');
+if (ci) {
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+    if (setter) setter.call(ci, token); else ci.value = token;
+    ci.dispatchEvent(new Event('input', { bubbles: true }));
+    ci.dispatchEvent(new Event('change', { bubbles: true }));
+}
+                        """, turnstile_response)
+                        return
+
+                    # Try clicking the turnstile box
+                    self.browser.run_js("""
+const box = document.querySelector('.cf-turnstile, .turnstile, [data-sitekey]');
+if (box) {
+    box.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    const rect = box.getBoundingClientRect();
+    box.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: rect.left + rect.width/2, clientY: rect.top + rect.height/2 }));
+}
+                    """)
+
+                    # Try interacting with iframe
+                    try:
+                        challenge_solution = self.browser.page.ele("@name=cf-turnstile-response", timeout=2)
+                        challenge_wrapper = challenge_solution.parent()
+                        challenge_iframe = challenge_wrapper.shadow_root.ele("tag:iframe", timeout=2)
+                        challenge_iframe.run_js("""
+window.dtp = 1;
+Object.defineProperty(MouseEvent.prototype, 'screenX', { value: Math.floor(Math.random() * 400 + 800) });
+Object.defineProperty(MouseEvent.prototype, 'screenY', { value: Math.floor(Math.random() * 200 + 400) });
+                        """)
+                        challenge_iframe_body = challenge_iframe.ele("tag:body", timeout=2).shadow_root
+                        challenge_button = challenge_iframe_body.ele("tag:input", timeout=2)
+                        challenge_button.click()
+                    except Exception:
+                        pass
+
+                except Exception:
+                    pass
+                time.sleep(1)
+
+            logger.warning("Turnstile auto-solve timeout, continuing anyway")
+
+        except Exception as e:
+            logger.warning(f"Turnstile handling: {e}")
+
+    def _click_oauth_authorize(self):
+        """If on OAuth authorize page, click the Authorize/Allow button."""
+        try:
+            url = self.browser.page.url if self.browser.page else ''
+            if 'oauth2/authorize' not in url and 'authorize' not in url:
+                return False
+
+            logger.info(f"OAuth authorize page detected: {url[:80]}..., clicking authorize...")
+            clicked = self.browser.run_js(r"""
+function isVisible(node) {
+    if (!node) return false;
+    const style = window.getComputedStyle(node);
+    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+    const rect = node.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+}
+const buttons = Array.from(document.querySelectorAll('button, input[type="submit"], [role="button"]'));
+const target = buttons.find(n => {
+    if (!isVisible(n) || n.disabled) return false;
+    const text = (n.innerText || n.value || n.textContent || '').replace(/\s+/g, '').toLowerCase();
+    return text === 'authorize' || text === 'allow' || text.includes('授权') || text.includes('允许')
+        || text === 'accept' || text.includes('同意');
+});
+if (target) {
+    target.focus();
+    target.click();
+    return true;
+}
+// Fallback: try form submit
+const form = document.querySelector('form');
+if (form) {
+    form.dispatchEvent(new Event('submit', {bubbles: true, cancelable: true}));
+    return 'form-submitted';
+}
+return false;
+            """)
+            if clicked:
+                logger.info("OAuth authorize button clicked")
+                time.sleep(3)
+                return True
+            else:
+                logger.warning("OAuth authorize page detected but no authorize button found")
+                # Dump buttons for debugging
+                try:
+                    btn_info = self.browser.run_js("""
+return Array.from(document.querySelectorAll('button, input[type="submit"], [role="button"]')).map(n => ({
+    tag: n.tagName, text: (n.innerText || n.value || '').substring(0, 50),
+    visible: n.offsetWidth > 0 && n.offsetHeight > 0, disabled: !!n.disabled
+}));
+                    """)
+                    logger.info(f"Available buttons: {btn_info}")
+                except Exception:
+                    pass
+                return False
+        except Exception as e:
+            logger.warning(f"OAuth authorize click failed: {e}")
+            return False
+
+    def _check_sso_cookie(self):
+        """Quick one-shot check for SSO cookie (no polling). Returns cookie value or None."""
+        try:
+            self._refresh_active_page()
+            if not self.browser.page:
+                return None
+            # Method 1: DrissionPage cookies API
+            try:
+                cookies = self.browser.page.cookies(all_domains=True, all_info=True) or []
+                for item in cookies:
+                    name = str(item.get('name', '')).strip() if isinstance(item, dict) else str(getattr(item, 'name', '')).strip()
+                    value = str(item.get('value', '')).strip() if isinstance(item, dict) else str(getattr(item, 'value', '')).strip()
+                    if name == 'sso' and value:
+                        return value
+            except Exception:
+                pass
+            # Method 2: JS document.cookie
+            try:
+                js_cookies = self.browser.run_js('return document.cookie') or ''
+                for pair in js_cookies.split(';'):
+                    pair = pair.strip()
+                    if '=' in pair:
+                        name, value = pair.split('=', 1)
+                        if name.strip() == 'sso' and value.strip():
+                            return value.strip()
+            except Exception:
+                pass
+        except Exception:
+            pass
+        return None
+
+    def _extract_sso(self, timeout=120):
+        """Extract SSO cookie with polling (up to 120s), matching original script."""
+        deadline = time.time() + timeout
+        last_report = 0
+        last_seen_names = set()
+        last_authorize_attempt = 0
+        stuck_on_signup_start = None  # track if we're stuck on sign-up page
+
+        while time.time() < deadline:
+            try:
+                self._refresh_active_page()
+                if not self.browser.page:
+                    time.sleep(1)
+                    continue
+
+                # Auto-click OAuth authorize button if on authorize page (retry every 5s)
+                if time.time() - last_authorize_attempt > 5:
+                    try:
+                        current_url = self.browser.page.url if self.browser.page else ''
+                        if 'authorize' in current_url:
+                            last_authorize_attempt = time.time()
+                            self._click_oauth_authorize()
+                            continue
+                    except Exception:
+                        pass
+
+                # Method 1: DrissionPage cookies API (all domains)
+                try:
+                    cookies = self.browser.page.cookies(all_domains=True, all_info=True) or []
+                    for item in cookies:
+                        if isinstance(item, dict):
+                            name = str(item.get('name', '')).strip()
+                            value = str(item.get('value', '')).strip()
+                        else:
+                            name = str(getattr(item, 'name', '')).strip()
+                            value = str(getattr(item, 'value', '')).strip()
+                        if name:
+                            last_seen_names.add(name)
+                        if name == 'sso' and value:
+                            logger.info(f"SSO cookie found ({len(value)} chars)")
+                            return value
+                except Exception:
+                    pass
+
+                # Method 2: JS document.cookie
+                try:
+                    js_cookies = self.browser.run_js('return document.cookie') or ''
+                    for pair in js_cookies.split(';'):
+                        pair = pair.strip()
+                        if '=' in pair:
+                            name, value = pair.split('=', 1)
+                            if name.strip() == 'sso' and value.strip():
+                                logger.info(f"SSO found via JS ({len(value.strip())} chars)")
+                                return value.strip()
+                except Exception:
+                    pass
+
+                # Method 3: localStorage
+                try:
+                    ls = self.browser.run_js("""
+var r = '';
+for (var i = 0; i < localStorage.length; i++) {
+    var k = localStorage.key(i);
+    if (k.toLowerCase().indexOf('sso') >= 0 || k.toLowerCase().indexOf('token') >= 0) {
+        r = localStorage.getItem(k);
+        break;
+    }
+}
+return r;
+                    """)
+                    if ls:
+                        logger.info(f"SSO found via localStorage ({len(ls)} chars)")
+                        return ls
+                except Exception:
+                    pass
+
+            except PageDisconnectedError:
+                self._refresh_active_page()
+            except Exception:
+                pass
+
+            if time.time() - last_report >= 10:
+                current_url = ''
+                try:
+                    current_url = self.browser.page.url if self.browser.page else 'unknown'
+                except Exception:
+                    current_url = 'unknown'
+                logger.info(f"Waiting for SSO cookie... URL: {current_url}, seen cookies: {sorted(last_seen_names)}")
+                last_report = time.time()
+                # If stuck on sign-up page for >20s with no SSO, submission likely failed
+                if 'sign-up' in current_url or 'signup' in current_url:
+                    if stuck_on_signup_start is None:
+                        stuck_on_signup_start = time.time()
+                    elif time.time() - stuck_on_signup_start > 20:
+                        raise Exception(f"Stuck on sign-up page with no SSO for 20s — submission likely failed")
+
+            time.sleep(1)
+
+        raise Exception(f"SSO cookie not found within {timeout}s, seen cookies: {sorted(last_seen_names)}")
+
+    def _extract_visible_numbers(self):
+        try:
+            result = self.browser.run_js(r"""
+function isVisible(el) {
+    if (!el) return false;
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+}
+const selector = ['h1','h2','h3','h4','h5','h6','div','span','p','strong','b','small','[data-testid]','[class]','[role="heading"]'].join(',');
+const seen = new Set();
+const matches = [];
+for (const node of document.querySelectorAll(selector)) {
+    if (!isVisible(node)) continue;
+    const text = String(node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
+    if (!text) continue;
+    const found = text.match(/\d+(?:\.\d+)?/g);
+    if (!found) continue;
+    for (const value of found) {
+        const key = value + '@@' + text;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        matches.push({ value, text });
+    }
+}
+return matches.slice(0, 30);
+            """)
+            if result:
+                for item in result:
+                    logger.info(f"  Number: {item['value']} | Context: {item['text']}")
+            return result
+        except Exception:
+            return []
+
+    def _get_password(self, settings=None):
+        if settings is None:
+            settings = self.db.get_settings()
+        if settings.get('password_mode', 'auto') == 'manual':
+            return settings.get('manual_password', self._generate_password())
+        return self._generate_password()
+
+    def _generate_password(self):
+        """Generate password matching original script format."""
+        return 'N' + secrets.token_hex(4) + '!a7#' + secrets.token_urlsafe(6)
+
+    def _generate_random_name(self):
+        first_names = ['James', 'Mary', 'Robert', 'Patricia', 'John', 'Jennifer', 'Michael', 'Linda',
+                       'David', 'Elizabeth', 'William', 'Barbara', 'Richard', 'Susan', 'Joseph', 'Jessica',
+                       'Thomas', 'Sarah', 'Charles', 'Karen', 'Daniel', 'Lisa', 'Matthew', 'Nancy',
+                       'Anthony', 'Betty', 'Mark', 'Margaret', 'Donald', 'Sandra', 'Steven', 'Ashley',
+                       'Paul', 'Dorothy', 'Andrew', 'Kimberly', 'Joshua', 'Emily', 'Kenneth', 'Donna']
+        last_names = ['Smith', 'Johnson', 'Williams', 'Brown', 'Jones', 'Garcia', 'Miller', 'Davis',
+                      'Rodriguez', 'Martinez', 'Hernandez', 'Lopez', 'Gonzalez', 'Wilson', 'Anderson',
+                      'Thomas', 'Taylor', 'Moore', 'Jackson', 'Martin', 'Lee', 'Perez', 'Thompson',
+                      'White', 'Harris', 'Sanchez', 'Clark', 'Ramirez', 'Lewis', 'Robinson']
+        return random.choice(first_names), random.choice(last_names)
+
+    def _notify_mail_tm_switch(self):
+        self.socketio.emit('log', {
+            'level': 'warning',
+            'message': 'Switched to Mail.tm fallback mode (this round only)',
+            'timestamp': datetime.now().isoformat(),
+        })
+
+    def _emit_status(self):
+        self.socketio.emit('status_update', self.state.get_snapshot())
+
+    def _emit_error(self, code, message, fatal=False):
+        self.socketio.emit('error', {
+            'code': code,
+            'message': message,
+            'fatal': fatal,
+        })

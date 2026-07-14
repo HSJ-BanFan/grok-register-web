@@ -1,0 +1,34 @@
+# Runtime / secrets — never publish
+data/
+__pycache__/
+*.py[cod]
+*$py.class
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.*
+!.env.example
+
+# Account dumps / exports
+*outlook*.txt
+OUTLOOK*.txt
+accounts_*.txt
+sso.txt
+sso.json
+registered_accounts.*
+mail_credentials.txt
+
+# Browser / tooling junk
+.ruff_cache/
+.pytest_cache/
+.venv/
+venv/
+browser-profile*/
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
