@@ -35,6 +35,7 @@ class RegistrationEngine:
         self.email_mgr = email_mgr
         self.socketio = socketio
         self.state = state
+        self._cookie_banner_dismissed = False
 
     def run(self, max_rounds=0, max_retries=3, concurrency=1):
         self.state.status = 'running'
@@ -213,6 +214,7 @@ class RegistrationEngine:
                 pass
             time.sleep(1.5)
             self.browser.start()
+            self._cookie_banner_dismissed = False
             logger.info("Browser restarted (force close)")
         else:
             try:
@@ -224,6 +226,7 @@ class RegistrationEngine:
                     except Exception:
                         pass
                     self.browser._page = new_page
+                    self._cookie_banner_dismissed = False
             except Exception:
                 pass
             logger.info("Browser: cleared cookies, opened new tab")
@@ -422,6 +425,7 @@ class RegistrationEngine:
     # ── Page interaction (JS-based, matching original script) ──
 
     def _open_signup_page(self):
+        self._cookie_banner_dismissed = False
         logger.info("Refreshing active page...")
         self._refresh_active_page()
         logger.info(f"Navigating to {SIGNUP_URL}")
@@ -1194,6 +1198,8 @@ return !!(givenInput && familyInput && passwordInput);
 
     def _dismiss_cookie_banner(self):
         """Dismiss OneTrust/cookie consent banners that block form submit."""
+        if self._cookie_banner_dismissed:
+            return False
         try:
             result = self.browser.run_js(r"""
 // Prefer known OneTrust / common consent selectors first
@@ -1225,10 +1231,6 @@ const btn = buttons.find(n => {
   return labels.some(l => t === l || t.includes(l));
 });
 if (!btn) {
-  // Last resort: remove overlay containers so they stop blocking pointer events
-  ['#onetrust-consent-sdk', '#onetrust-banner-sdk', '#onetrust-pc-sdk', '.onetrust-pc-dark-filter'].forEach(sel => {
-    document.querySelectorAll(sel).forEach(n => n.remove());
-  });
   return matches.length ? ('found-but-not-clicked:' + JSON.stringify(matches.slice(0, 5))) : 'none';
 }
 try {
@@ -1239,13 +1241,10 @@ try {
 } catch (e) {
   return 'error:' + String(e);
 }
-// Hide remaining overlays if still present
-['#onetrust-consent-sdk', '#onetrust-banner-sdk', '.onetrust-pc-dark-filter'].forEach(sel => {
-  document.querySelectorAll(sel).forEach(n => { n.style.display = 'none'; n.remove(); });
-});
 return 'clicked-text:' + (btn.innerText || btn.value || '').trim().slice(0, 40);
             """)
             if result and str(result).startswith('clicked'):
+                self._cookie_banner_dismissed = True
                 logger.info(f"Cookie banner dismissed: {result}")
                 time.sleep(1.0)
                 return True
@@ -1255,6 +1254,7 @@ return 'clicked-text:' + (btn.innerText || btn.value || '').trim().slice(0, 40);
                     el = self.browser.page.ele(f'tag:button@@text()={label}', timeout=0.5)
                     if el:
                         el.click()
+                        self._cookie_banner_dismissed = True
                         logger.info(f"Cookie banner dismissed via DP: {label}")
                         time.sleep(1.0)
                         return True
@@ -1441,7 +1441,7 @@ return enabled ? 'enabled' : 'disabled';
                         time.sleep(1)
 
                     if not enabled_btn:
-                        logger.warning("Submit button still disabled after wait; attempting one more force path")
+                        logger.warning("Submit button still disabled after wait; refusing to force-enable")
 
                     # Click submit only when the page has enabled it. Never mutate
                     # disabled state: React/Turnstile uses that state as part of
