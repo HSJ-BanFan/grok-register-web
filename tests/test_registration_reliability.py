@@ -65,6 +65,14 @@ class RegistrationReliabilityTest(unittest.TestCase):
             MIN_VERIFICATION_CODE_POLLS,
         )
         db.complete_registration_success.assert_called_once()
+        self.assertEqual(
+            engine._fill_profile.call_args.kwargs['alias']['id'],
+            self._alias()['id'],
+        )
+        self.assertEqual(
+            engine._fill_profile.call_args.kwargs['alias_email'],
+            self._alias()['alias_email'],
+        )
 
     @patch('core.register.upload_registered_sso', return_value=None)
     def test_duplicate_sso_is_not_committed_or_uploaded(self, upload):
