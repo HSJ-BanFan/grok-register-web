@@ -4,6 +4,7 @@ import logging
 from datetime import datetime, timedelta
 from config import DB_PATH
 from core.failure_policy import (
+    FAILURE_CATEGORY_EXISTING_ACCOUNT,
     FAILURE_CATEGORY_MAIL_FETCH,
     FAILURE_CATEGORY_REGISTRATION,
     account_disable_reason,
@@ -622,6 +623,62 @@ class Database:
                 released = cur.rowcount == 1
                 self.conn.commit()
                 return released
+            except Exception:
+                self.conn.rollback()
+                raise
+
+    def skip_existing_account_attempt(self, reg_id, alias_id, lease_owner,
+                                      error, duration):
+        """Terminally skip an alias already registered at xAI without retrying it."""
+        with self._write_lock:
+            cur = self.conn.cursor()
+            try:
+                cur.execute('BEGIN IMMEDIATE')
+                cur.execute(
+                    '''UPDATE registrations SET status='skipped', error_message=?,
+                       duration_seconds=? WHERE id=?''',
+                    (error, duration, reg_id),
+                )
+                alias = cur.execute(
+                    '''SELECT account_id, retry_count, status, lease_owner
+                       FROM aliases WHERE id=?''',
+                    (alias_id,),
+                ).fetchone()
+                if (
+                    not alias
+                    or alias['status'] != 'processing'
+                    or alias['lease_owner'] != lease_owner
+                ):
+                    self.conn.commit()
+                    return {
+                        'lease_lost': True,
+                        'retry_count': int(alias['retry_count'] or 0) if alias else 0,
+                        'account_disabled': False,
+                        'disable_reason': '',
+                    }
+
+                completed_at = datetime.now().isoformat()
+                cur.execute(
+                    '''UPDATE aliases SET status='failed', error_reason=?,
+                       failure_category=?, used_at=NULL, completed_at=?,
+                       lease_owner='', lease_expires_at=NULL WHERE id=?''',
+                    (
+                        error,
+                        FAILURE_CATEGORY_EXISTING_ACCOUNT,
+                        completed_at,
+                        alias_id,
+                    ),
+                )
+                disabled, reason, _ = self._maybe_disable_unusable_account_locked(
+                    cur, alias['account_id'],
+                )
+                self.conn.commit()
+                return {
+                    'lease_lost': False,
+                    'retry_count': int(alias['retry_count'] or 0),
+                    'account_disabled': disabled,
+                    'disable_reason': reason,
+                }
             except Exception:
                 self.conn.rollback()
                 raise

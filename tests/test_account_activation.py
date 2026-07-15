@@ -3,6 +3,7 @@ from unittest.mock import Mock, patch
 
 from core.account_activation import (
     _extract_browser_context,
+    _set_tos,
     inject_sso_cookie,
     switch_sso_cookie,
     activate_grok_web,
@@ -60,6 +61,22 @@ class AccountActivationTest(unittest.TestCase):
         self.assertTrue(deleted)
         self.assertTrue(set_calls)
         self.assertEqual(set_calls[0].kwargs['value'], 'new-sso')
+        self.assertEqual(
+            {call.kwargs['name'] for call in set_calls},
+            {'sso', 'sso-rw'},
+        )
+
+    def test_set_tos_passes_browser_proxy(self):
+        session = Mock()
+        session.post.return_value = Mock(status_code=200)
+
+        result = _set_tos(session, proxy_url='http://proxy.example:8080')
+
+        self.assertTrue(result)
+        self.assertEqual(
+            session.post.call_args.kwargs['proxy'],
+            'http://proxy.example:8080',
+        )
 
     def test_activate_grok_web_injects_sso_before_opening_sites(self):
         browser = Mock()
@@ -89,13 +106,17 @@ class AccountActivationTest(unittest.TestCase):
         page.set.cookies = Mock()
         page.set.cookies.remove = Mock()
 
-        with patch('core.account_activation._set_tos', return_value=True), \
+        with patch('core.account_activation._set_tos', return_value=True) as set_tos, \
              patch('core.account_activation.requests.Session') as session_cls:
             session = Mock()
             session.headers = {}
             session.cookies = Mock()
             session_cls.return_value = session
-            result = activate_grok_web(browser, 'historical-sso')
+            result = activate_grok_web(
+                browser,
+                'historical-sso',
+                proxy_url='http://proxy.example:8080',
+            )
 
         self.assertTrue(result.ready)
         self.assertIn('cf_clearance=clearance', result.cloudflare_cookies)
@@ -104,6 +125,12 @@ class AccountActivationTest(unittest.TestCase):
         urls = [call.args[0] for call in page.get.call_args_list]
         self.assertIn('https://accounts.x.ai/', urls)
         self.assertIn('https://grok.com/', urls)
+        set_tos.assert_called_once_with(
+            session,
+            proxy_url='http://proxy.example:8080',
+        )
+        cookie_names = {call.args[0] for call in session.cookies.set.call_args_list}
+        self.assertEqual(cookie_names, {'sso', 'sso-rw', 'cf_clearance', '__cf_bm'})
 
     def test_activate_ready_when_probe_501_but_tos_and_session_ok(self):
         browser = Mock()

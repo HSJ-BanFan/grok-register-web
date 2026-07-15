@@ -188,6 +188,45 @@ class ConcurrentAliasClaimTest(unittest.TestCase):
         self.assertEqual(registration['status'], 'failed')
         self.assertIn('permission_denied', registration['error_message'])
 
+    def test_existing_account_is_skipped_without_retrying_alias(self):
+        self._add_accounts(1)
+        alias = self.db.claim_next_alias(3, 'worker-1', lease_seconds=60)
+        reg_id = self.db.create_registration(
+            alias['id'], alias['alias_email'], 'password', 1,
+            lease_owner='worker-1',
+        )
+
+        outcome = self.db.skip_existing_account_attempt(
+            reg_id,
+            alias['id'],
+            'worker-1',
+            '注册邮箱已存在：xAI reports Existing account found',
+            0.9,
+        )
+
+        row = self.db.conn.execute(
+            '''SELECT status, retry_count, failure_category, lease_owner
+               FROM aliases WHERE id=?''',
+            (alias['id'],),
+        ).fetchone()
+        registration = self.db.conn.execute(
+            'SELECT status, error_message FROM registrations WHERE id=?',
+            (reg_id,),
+        ).fetchone()
+        next_alias = self.db.claim_next_alias(
+            3, 'worker-2', lease_seconds=60,
+        )
+
+        self.assertFalse(outcome['lease_lost'])
+        self.assertEqual(row['status'], 'failed')
+        self.assertEqual(row['retry_count'], 0)
+        self.assertEqual(row['failure_category'], 'existing_account')
+        self.assertEqual(row['lease_owner'], '')
+        self.assertEqual(registration['status'], 'skipped')
+        self.assertIn('Existing account found', registration['error_message'])
+        self.assertNotEqual(next_alias['id'], alias['id'])
+        self.assertEqual(next_alias['alias_index'], 1)
+
 
 class RegistrationStateConcurrencyTest(unittest.TestCase):
     def test_active_workers_and_counters_are_thread_safe(self):

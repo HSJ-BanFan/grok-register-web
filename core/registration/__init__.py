@@ -2,6 +2,7 @@
 
 from .state import (
     EMAIL_REQUEST_MIN_INTERVAL,
+    ExistingAccountError,
     RegistrationState,
     VerificationRequestError,
     email_request_slot,
@@ -17,6 +18,7 @@ from .profile import (
 
 __all__ = [
     'EMAIL_REQUEST_MIN_INTERVAL',
+    'ExistingAccountError',
     'RegistrationState',
     'VerificationRequestError',
     'email_request_slot',

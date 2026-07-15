@@ -133,7 +133,13 @@ class BatchActivationEngine:
         logger.info('Activating Grok Web for historical SSO...')
         # timeout=0 => wait indefinitely for manual Cloudflare completion.
         # After the first account clears CF, later accounts reuse cf_clearance.
-        activation = activate_grok_web(self.browser, sso, timeout=0, reuse_cloudflare=True)
+        activation = activate_grok_web(
+            self.browser,
+            sso,
+            timeout=0,
+            reuse_cloudflare=True,
+            proxy_url=(settings.get('browser_proxy', '') or '').strip(),
+        )
         if activation.ready:
             logger.info('Grok Web activation completed for %s: %s', email, activation.message)
         else:

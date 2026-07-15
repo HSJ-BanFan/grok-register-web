@@ -14,6 +14,7 @@ from core.grok2api_client import upload_registered_sso
 from core.account_activation import activate_grok_web
 from core.registration.state import (
     EMAIL_REQUEST_MIN_INTERVAL,
+    ExistingAccountError,
     RegistrationState,
     VerificationRequestError,
     email_request_slot,
@@ -305,7 +306,11 @@ class RegistrationEngine:
             if settings.get('grok_web_activation', 'true') == 'true':
                 try:
                     logger.info('Activating Grok Web before clearing browser cookies...')
-                    activation = activate_grok_web(self.browser, sso)
+                    activation = activate_grok_web(
+                        self.browser,
+                        sso,
+                        proxy_url=(settings.get('browser_proxy', '') or '').strip(),
+                    )
                     if activation and activation.ready:
                         logger.info(f'Grok Web activation completed: {activation.message}')
                     else:
@@ -381,6 +386,46 @@ class RegistrationEngine:
                     'Round %s completed successfully but cleanup failed: %s',
                     round_num, error_msg,
                 )
+                return
+            if isinstance(e, ExistingAccountError):
+                outcome = self.db.skip_existing_account_attempt(
+                    reg_id=reg_id,
+                    alias_id=alias['id'],
+                    lease_owner=lease_owner,
+                    error=error_msg,
+                    duration=duration,
+                )
+                self.state.record_failure()
+                if outcome['lease_lost']:
+                    logger.warning(
+                        'Existing account %s detected, but alias lease was lost before skip commit',
+                        alias_email,
+                    )
+                else:
+                    logger.warning(
+                        'Existing account skipped without retry: %s',
+                        alias_email,
+                    )
+                    if outcome['account_disabled']:
+                        logger.warning(
+                            'Skipped remaining aliases for account %s: %s',
+                            alias.get('main_email') or alias_email,
+                            outcome['disable_reason'],
+                        )
+                self.socketio.emit('round_complete', {
+                    'round': round_num,
+                    'email': alias_email,
+                    'success': False,
+                    'skipped': True,
+                    'reason': 'existing_account',
+                    'duration': round(duration, 1),
+                })
+                self._emit_status()
+                if not self.state.should_stop():
+                    try:
+                        self._restart_browser(force_close=True)
+                    except Exception:
+                        pass
                 return
             if isinstance(e, VerificationRequestError) and is_xai_permission_denied(e):
                 released = self.db.abort_registration_attempt(
@@ -1616,7 +1661,7 @@ if (lower.includes('existing account found')
 return '';
                 """)
                 if existing_account:
-                    raise Exception(
+                    raise ExistingAccountError(
                         '注册邮箱已存在：xAI reports Existing account found'
                     )
                 filled = self.browser.run_js(
@@ -2061,6 +2106,8 @@ return {
             except Exception as e:
                 # Re-raise real submit failures instead of looping until timeout
                 msg = str(e)
+                if isinstance(e, ExistingAccountError):
+                    raise
                 if any(k in msg for k in (
                     '注册提交失败', '注册提交未生效', '注册提交超时',
                     '注册提交按钮未启用', '注册提交缺少有效', 'Turnstile',

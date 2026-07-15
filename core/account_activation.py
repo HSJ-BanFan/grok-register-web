@@ -195,9 +195,13 @@ return {challenge, url: location.href, title: document.title};
     return False
 
 
-def _set_tos(session):
+def _set_tos(session, proxy_url=''):
     payload = struct.pack('B', (2 << 3) | 0) + struct.pack('B', 1)
     data = b'\x00' + struct.pack('>I', len(payload)) + payload
+    request_options = {}
+    proxy_url = str(proxy_url or '').strip()
+    if proxy_url:
+        request_options['proxy'] = proxy_url
     response = session.post(
         'https://accounts.x.ai/auth_mgmt.AuthManagement/SetTosAcceptedVersion',
         data=data,
@@ -209,6 +213,7 @@ def _set_tos(session):
             'referer': 'https://accounts.x.ai/accept-tos',
         },
         timeout=20,
+        **request_options,
     )
     return 200 <= response.status_code < 300
 
@@ -235,25 +240,28 @@ def inject_sso_cookie(page, sso_cookie):
 
     # Prefer CDP so domain cookies can be set even on about:blank.
     for domain in ('.x.ai', 'accounts.x.ai', '.grok.com', 'grok.com'):
-        try:
-            page.run_cdp(
-                'Network.setCookie',
-                name='sso',
-                value=token,
-                domain=domain,
-                path='/',
-                secure=True,
-                httpOnly=True,
-                sameSite='None',
-            )
-        except Exception as exc:
-            logger.debug('Failed to set sso cookie on %s: %s', domain, exc)
+        for name in ('sso', 'sso-rw'):
+            try:
+                page.run_cdp(
+                    'Network.setCookie',
+                    name=name,
+                    value=token,
+                    domain=domain,
+                    path='/',
+                    secure=True,
+                    httpOnly=True,
+                    sameSite='None',
+                )
+            except Exception as exc:
+                logger.debug('Failed to set %s cookie on %s: %s', name, domain, exc)
 
     # Fallback via DrissionPage cookie setter (domain-aware).
     try:
         page.set.cookies([
             {'name': 'sso', 'value': token, 'domain': '.x.ai', 'path': '/', 'secure': True},
+            {'name': 'sso-rw', 'value': token, 'domain': '.x.ai', 'path': '/', 'secure': True},
             {'name': 'sso', 'value': token, 'domain': '.grok.com', 'path': '/', 'secure': True},
+            {'name': 'sso-rw', 'value': token, 'domain': '.grok.com', 'path': '/', 'secure': True},
         ])
     except Exception as exc:
         logger.debug('page.set.cookies fallback failed: %s', exc)
@@ -275,7 +283,8 @@ def _safe_run_js(page, script, *args, timeout=20, default=None):
         return default if default is not None else {}
 
 
-def activate_grok_web(browser, sso_cookie, timeout=60, reuse_cloudflare=True):
+def activate_grok_web(browser, sso_cookie, timeout=60, reuse_cloudflare=True,
+                      proxy_url=''):
     page = browser.page
     sso = (sso_cookie or '').strip()
     if not sso:
@@ -333,6 +342,20 @@ def activate_grok_web(browser, sso_cookie, timeout=60, reuse_cloudflare=True):
             user_agent=user_agent,
         )
 
+    session = requests.Session(impersonate='chrome')
+    session.headers.update({'user-agent': user_agent or 'Mozilla/5.0'})
+    for name in ('sso', 'sso-rw'):
+        session.cookies.set(name, sso, domain='.x.ai')
+    for part in cloudflare_cookies.split(';'):
+        name, _, value = part.strip().partition('=')
+        if name and value:
+            session.cookies.set(name, value, domain='.grok.com')
+    try:
+        tos_ok = _set_tos(session, proxy_url=proxy_url)
+    except Exception as exc:
+        logger.warning('TOS request failed: %s', exc)
+        tos_ok = False
+
     birth = _safe_run_js(
         page,
         r"""
@@ -353,19 +376,6 @@ return fetch('/rest/auth/set-birth-date', {
         timeout=20,
         default={},
     )
-
-    session = requests.Session(impersonate='chrome')
-    session.headers.update({'user-agent': user_agent or 'Mozilla/5.0'})
-    session.cookies.set('sso', sso, domain='.x.ai')
-    for part in cloudflare_cookies.split(';'):
-        name, _, value = part.strip().partition('=')
-        if name and value:
-            session.cookies.set(name, value, domain='.grok.com')
-    try:
-        tos_ok = _set_tos(session)
-    except Exception as exc:
-        logger.warning('TOS request failed: %s', exc)
-        tos_ok = False
 
     # Avoid top-level await (DrissionPage / page refresh fragile). Promise chain only.
     probe = _safe_run_js(

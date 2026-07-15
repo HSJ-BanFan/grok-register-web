@@ -49,7 +49,13 @@ class BatchActivationEngineTest(unittest.TestCase):
         with patch('core.batch_activation.activate_grok_web', return_value=context) as activate:
             result = engine._activate_one(record, settings)
 
-        activate.assert_called_once_with(browser, 'sso-token', timeout=0, reuse_cloudflare=True)
+        activate.assert_called_once_with(
+            browser,
+            'sso-token',
+            timeout=0,
+            reuse_cloudflare=True,
+            proxy_url='',
+        )
         engine._sync_egress.assert_called_once_with(settings, context)
         self.assertTrue(result.ready)
         socketio.emit.assert_called()

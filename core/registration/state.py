@@ -45,6 +45,10 @@ class VerificationRequestError(RuntimeError):
     """xAI rejected or did not complete the send-code request."""
 
 
+class ExistingAccountError(RuntimeError):
+    """xAI reports that the email already belongs to an existing account."""
+
+
 class RegistrationState:
     def __init__(self):
         self._pause_event = threading.Event()
