@@ -2,18 +2,73 @@ import logging
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 logger = logging.getLogger('register')
 
 
 class BrowserError(Exception):
     pass
+
+
+def _parsed_proxy_url(proxy):
+    value = (proxy or '').strip()
+    if not value:
+        return None
+    parsed = urlsplit(value if '://' in value else f'http://{value}')
+    if not parsed.hostname:
+        raise BrowserError(f'Invalid browser proxy URL: {value}')
+    return parsed
+
+
+def redact_proxy_url(proxy):
+    """Return a log-safe proxy URL without embedded credentials."""
+    parsed = _parsed_proxy_url(proxy)
+    if parsed is None:
+        return ''
+    host = parsed.hostname or ''
+    if ':' in host and not host.startswith('['):
+        host = f'[{host}]'
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise BrowserError(f'Invalid browser proxy port: {exc}') from exc
+    netloc = f'{host}:{port}' if port else host
+    return urlunsplit((parsed.scheme or 'http', netloc, '', '', ''))
+
+
+def validate_proxy_endpoint(proxy, timeout=3):
+    """Verify that the configured proxy endpoint is reachable from this process."""
+    parsed = _parsed_proxy_url(proxy)
+    if parsed is None:
+        return None
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise BrowserError(f'Invalid browser proxy port: {exc}') from exc
+    if port is None:
+        port = (
+            443 if parsed.scheme == 'https'
+            else 1080 if parsed.scheme.startswith('socks')
+            else 80
+        )
+    try:
+        connection = socket.create_connection((parsed.hostname, port), timeout=timeout)
+        connection.close()
+    except OSError as exc:
+        safe_proxy = redact_proxy_url(proxy)
+        raise BrowserError(
+            f'Browser proxy is not reachable from this process/network namespace: '
+            f'{safe_proxy} ({type(exc).__name__}: {exc})'
+        ) from exc
+    return parsed.hostname, port
 
 
 class BrowserManager:
@@ -54,6 +109,18 @@ class BrowserManager:
     def start(self):
         from DrissionPage import Chromium, ChromiumOptions
         logger.info("Starting browser...")
+        if sys.platform.startswith('linux') and not self.headless:
+            if not (os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY')):
+                raise BrowserError(
+                    'Headful Chrome requires DISPLAY/WAYLAND_DISPLAY on Linux. '
+                    'Start the application with scripts/run_with_xvfb.sh.'
+                )
+        if self.proxy:
+            validate_proxy_endpoint(self.proxy)
+            logger.info(
+                'Browser proxy endpoint reachable from current network namespace: %s',
+                redact_proxy_url(self.proxy),
+            )
         co = ChromiumOptions()
         co.auto_port()
         co.set_timeouts(base=1)
@@ -65,6 +132,7 @@ class BrowserManager:
         co.set_argument('--disable-blink-features=AutomationControlled')
         co.set_argument('--disable-infobars')
         co.set_argument('--lang=en-US')
+        co.set_argument('--window-size=1365,900')
         co.set_pref('credentials_enable_service', False)
         co.set_pref('profile.password_manager_enabled', False)
 
@@ -86,9 +154,12 @@ class BrowserManager:
                         co.set_argument('--proxy-server', proxy)
                         applied = True
                     except Exception as exc:
-                        logger.warning('Failed to apply browser proxy %s: %s', proxy, exc)
+                        logger.warning(
+                            'Failed to apply browser proxy %s: %s',
+                            redact_proxy_url(proxy), exc,
+                        )
             if applied:
-                logger.info('Browser proxy enabled: %s', proxy)
+                logger.info('Browser proxy enabled: %s', redact_proxy_url(proxy))
 
         runtime_user_data_path = self._prepare_user_data_path()
         co.set_user_data_path(runtime_user_data_path)

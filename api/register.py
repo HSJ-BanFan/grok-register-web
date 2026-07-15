@@ -2,6 +2,8 @@ import threading
 import logging
 from flask import Blueprint, request, jsonify
 
+from core.runtime import resolve_registration_concurrency
+
 register_bp = Blueprint('register', __name__)
 
 _register_lock = threading.Lock()
@@ -39,12 +41,13 @@ def init_register_api(db, browser_mgr, email_mgr, socketio):
             if max_retries < 1:
                 raise ValueError('max_retries must be at least 1')
             settings = _db.get_settings()
-            concurrency = int(data.get(
+            requested_concurrency = int(data.get(
                 'concurrency',
                 settings.get('registration_concurrency', 1),
             ))
-            if concurrency < 1 or concurrency > 10:
+            if requested_concurrency < 1 or requested_concurrency > 10:
                 raise ValueError('concurrency must be between 1 and 10')
+            concurrency = resolve_registration_concurrency(requested_concurrency)
         except (ValueError, TypeError) as e:
             _register_lock.release()
             return jsonify({'success': False, 'data': None, 'message': f'Invalid parameter: {e}', 'code': 'INVALID_PARAMS'}), 400

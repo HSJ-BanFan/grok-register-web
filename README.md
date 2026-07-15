@@ -71,6 +71,36 @@ python app.py --port 8080
 python app.py --host 0.0.0.0 --port 5000 --allow-remote   # 仅限可信网络
 ```
 
+### Linux 服务器：Xvfb 虚拟有头模式
+
+xAI/Cloudflare 会直接拦截部分带 `HeadlessChrome` 指纹的请求。没有物理桌面的
+Linux 服务器应使用 Xvfb 运行普通有头 Chrome，而不是开启浏览器无头模式：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y xvfb xauth
+
+bash scripts/run_with_xvfb.sh \
+  --host 0.0.0.0 --port 5000 --allow-remote
+```
+
+启动脚本会强制：
+
+- `GROK_REGISTER_BROWSER_HEADLESS=false`
+- `GROK_REGISTER_CONCURRENCY=1`
+- `1365x900x24` 虚拟显示器
+
+如需指定 Python：
+
+```bash
+PYTHON_BIN=/path/to/venv/bin/python bash scripts/run_with_xvfb.sh \
+  --host 0.0.0.0 --allow-remote
+```
+
+如果配置了浏览器代理，程序会在启动 Chrome 前从当前 Python 进程所在的网络
+命名空间连接代理端口。Docker 中的 `127.0.0.1` 指向容器自身；代理运行在宿主机
+时，应改用容器可访问的宿主机地址、`host.docker.internal` 或 Compose 服务名。
+
 ### 3. 使用流程
 
 1. **导入账号** — `邮箱----密码----ClientID----RefreshToken`
@@ -135,6 +165,7 @@ grok-register/
 ├── static/               # 前端 SPA
 ├── templates/
 ├── turnstilePatch/       # Turnstile 辅助扩展
+├── scripts/              # Xvfb 等服务器启动脚本
 ├── tests/
 └── data/                 # 运行时生成（本地数据库，勿提交）
 ```
@@ -174,6 +205,8 @@ grok-register/
 | 日志或现象 | 实际含义 | 建议处理 |
 |------------|----------|----------|
 | `[permission_denied] HTTP 403` | xAI 拒绝了发送验证码请求；这时邮箱里本来就不会有新验证码 | 确认使用最新代码且没有自行恢复旧 stealth；停止高并发，等待风控窗口，检查公网出口/IP 信誉。不要把它当成 Outlook 收信故障 |
+| `SIGNUP_ENVIRONMENT_BLOCKED` | 注册页被 Cloudflare 硬拦截，或浏览器显示代理连接错误页 | alias 会被释放且不消耗重试。Linux 服务器改用 `scripts/run_with_xvfb.sh`，并检查代理是否位于同一网络命名空间；查看 `data/diagnostics/signup-*.json/.png` |
+| `Browser proxy is not reachable from this process/network namespace` | 当前程序进程无法连接配置的代理主机和端口 | Docker 中不要误用指向宿主机代理的 `127.0.0.1`；改用宿主机网关地址或代理服务名 |
 | `未找到邮箱注册入口按钮` | 当前页面没有进入预期注册入口，可能仍在加载、被挑战/错误页拦截、页面结构发生变化或浏览器环境异常 | 使用有头模式观察实际页面并保存截图；确认 Chrome 可正常访问 `accounts.x.ai`，再附日志和 `data/diagnostics/` 报告问题 |
 | `未找到最终注册表单或完成注册按钮` | OTP 后没有得到稳定资料表单；也可能站点已经自动完成、邮箱已有账号，或页面被重新挂载 | 当前版本已识别自动完成和 Existing account；若最新版仍出现，查看紧邻日志、最终 URL、诊断 JSON 与截图 |
 | `Profile network diagnostic: ... status=...` | 资料提交阶段捕获到的网络请求，不等于这一行本身就是失败 | 重点看 create-account/sign-up 相关 POST、`status`、`failed`、最终 URL 和是否找到 SSO。某些浏览器事件会把已成功导航的请求标成 `failed=True`，最终应以进入 account/grok 页面和取得 SSO 为准 |

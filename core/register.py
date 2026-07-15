@@ -27,6 +27,13 @@ from core.registration.profile import (
     classify_profile_submit,
     save_profile_diagnostics,
 )
+from core.registration.signup import (
+    SignupEnvironmentError,
+    SignupPageSnapshot,
+    SignupPageStage,
+    save_signup_diagnostics,
+)
+from core.runtime import resolve_browser_headless, resolve_registration_concurrency
 
 logger = logging.getLogger('register')
 
@@ -43,7 +50,7 @@ class RegistrationEngine:
     def run(self, max_rounds=0, max_retries=3, concurrency=1):
         self.state.status = 'running'
         settings = self.db.get_settings()
-        concurrency = max(1, min(10, int(concurrency or 1)))
+        concurrency = resolve_registration_concurrency(concurrency)
         batch_id = secrets.token_hex(6)
         claimed_any = threading.Event()
         browser_started_any = threading.Event()
@@ -96,7 +103,7 @@ class RegistrationEngine:
 
     def _run_worker(self, worker_id, lease_owner, max_rounds, max_retries,
                     settings, claimed_any, browser_started_any):
-        self.browser.headless = settings.get('browser_headless', 'false') == 'true'
+        self.browser.headless = resolve_browser_headless(settings)
         self.browser.proxy = (settings.get('browser_proxy', '') or '').strip()
         lease_seconds = max(
             120,
@@ -387,6 +394,42 @@ class RegistrationEngine:
                     round_num, error_msg,
                 )
                 return
+            if isinstance(e, SignupEnvironmentError):
+                released = self.db.abort_registration_attempt(
+                    reg_id=reg_id,
+                    alias_id=alias['id'],
+                    lease_owner=lease_owner,
+                    error=error_msg,
+                    duration=duration,
+                )
+                self.state.stop()
+                logger.error(
+                    'Round %s stopped by signup environment block (%s); alias %s '
+                    'was %s without consuming a retry; diagnostics=%s',
+                    round_num,
+                    e.reason,
+                    alias_email,
+                    'released' if released else 'not released (lease lost)',
+                    e.diagnostics,
+                )
+                self.socketio.emit('round_complete', {
+                    'round': round_num,
+                    'email': alias_email,
+                    'success': False,
+                    'environment_blocked': True,
+                    'reason': e.reason,
+                    'duration': round(duration, 1),
+                })
+                self._emit_error(
+                    'SIGNUP_ENVIRONMENT_BLOCKED',
+                    'The xAI signup page was blocked by Cloudflare or a proxy/browser '
+                    'environment error. The alias was preserved and no retry was '
+                    'consumed. Use headful Chrome under Xvfb and verify the proxy '
+                    f'from the same container/network namespace. Diagnostics: {e.diagnostics}',
+                    fatal=True,
+                )
+                self._emit_status()
+                return
             if isinstance(e, ExistingAccountError):
                 outcome = self.db.skip_existing_account_attempt(
                     reg_id=reg_id,
@@ -504,25 +547,17 @@ class RegistrationEngine:
         logger.info("Looking for email signup button...")
         self._click_email_signup_button()
 
-    def _wait_for_signup_ready(self, timeout=60):
-        """Wait out Cloudflare/challenge pages before looking for signup controls."""
-        deadline = time.time() + timeout
-        last_notice = 0
-        while time.time() < deadline:
-            try:
-                state = self.browser.run_js(r"""
-const title = String(document.title || '').toLowerCase();
-const body = String((document.body && document.body.innerText) || '').toLowerCase();
-const href = String(location.href || '').toLowerCase();
-const challenge = title.includes('just a moment')
-  || body.includes('verifying you are human')
-  || body.includes('performing security verification')
-  || !!document.querySelector('#challenge-stage, script[src*="challenge-platform"]');
-const hasEmailField = !!document.querySelector('input[type="email"], input[name="email"], input[autocomplete="email"]');
-const buttons = Array.from(document.querySelectorAll('button, a, [role="button"]')).map(n =>
-  ((n.innerText || n.textContent || '') + ' ' + (n.getAttribute('aria-label') || '')).toLowerCase()
-);
-const hasEmailSignup = buttons.some(t =>
+    def _capture_signup_snapshot(self):
+        try:
+            value = self.browser.run_js(r"""
+const bodyText = String((document.body && document.body.innerText) || '');
+const buttons = Array.from(document.querySelectorAll('button, a, [role="button"]'));
+const buttonLabels = buttons.map(n =>
+  ((n.innerText || n.textContent || '') + ' ' + (n.getAttribute('aria-label') || ''))
+    .replace(/\s+/g, ' ').trim()
+).filter(Boolean).slice(0, 20);
+const normalizedLabels = buttonLabels.map(t => t.toLowerCase());
+const hasEmailSignup = normalizedLabels.some(t =>
   t.includes('使用邮箱注册')
   || t.includes('邮箱注册')
   || (t.includes('sign up') && t.includes('email'))
@@ -530,22 +565,74 @@ const hasEmailSignup = buttons.some(t =>
   || t.includes('continue with email')
   || t.includes('register with email')
 );
-return {challenge, href, hasEmailField, hasEmailSignup, title: document.title};
-                """) or {}
-                if state.get('challenge'):
-                    now = time.time()
-                    if now - last_notice >= 10:
-                        logger.info('Signup page is still on Cloudflare challenge, waiting...')
-                        last_notice = now
-                    time.sleep(1)
-                    continue
-                if state.get('hasEmailField') or state.get('hasEmailSignup'):
-                    return True
-            except Exception:
-                pass
+return {
+  href: String(location.href || ''),
+  title: String(document.title || ''),
+  readyState: String(document.readyState || ''),
+  bodyText: bodyText.slice(0, 3000),
+  userAgent: String(navigator.userAgent || ''),
+  hasEmailField: !!document.querySelector('input[type="email"], input[name="email"], input[autocomplete="email"]'),
+  hasEmailSignup,
+  hasChallengeDom: !!document.querySelector(
+    '#challenge-stage, #cf-error-details, script[src*="challenge-platform"], iframe[src*="challenge"]'
+  ),
+  buttonLabels,
+};
+            """) or {}
+            return SignupPageSnapshot.from_mapping(value)
+        except Exception as exc:
+            return SignupPageSnapshot(capture_error=f'{type(exc).__name__}: {exc}')
+
+    def _save_signup_diagnostics(self, stage, snapshot, reason):
+        try:
+            diagnostics = save_signup_diagnostics(
+                self.browser.page, stage, snapshot, reason,
+            )
+            logger.warning('Signup diagnostics saved: %s', diagnostics)
+            return diagnostics
+        except Exception as exc:
+            logger.warning('Failed to save signup diagnostics: %s', exc)
+            return {}
+
+    def _wait_for_signup_ready(self, timeout=60):
+        """Wait out Cloudflare/challenge pages before looking for signup controls."""
+        deadline = time.time() + timeout
+        last_notice = 0
+        last_snapshot = SignupPageSnapshot()
+        while time.time() < deadline:
+            last_snapshot = self._capture_signup_snapshot()
+            stage = last_snapshot.stage
+            if stage in (SignupPageStage.BLOCKED, SignupPageStage.PROXY_ERROR):
+                reason = (
+                    'cloudflare_blocked'
+                    if stage == SignupPageStage.BLOCKED
+                    else 'proxy_page_error'
+                )
+                diagnostics = self._save_signup_diagnostics(
+                    stage, last_snapshot, reason,
+                )
+                raise SignupEnvironmentError(
+                    reason, snapshot=last_snapshot, diagnostics=diagnostics,
+                )
+            if stage == SignupPageStage.CHALLENGE:
+                now = time.time()
+                if now - last_notice >= 10:
+                    logger.info('Signup page is still on Cloudflare challenge, waiting...')
+                    last_notice = now
+                time.sleep(1)
+                continue
+            if stage == SignupPageStage.READY:
+                return last_snapshot
             time.sleep(0.5)
-        logger.warning('Signup page readiness wait timed out; continuing anyway')
-        return False
+        diagnostics = self._save_signup_diagnostics(
+            SignupPageStage.STALLED,
+            last_snapshot,
+            'signup_page_readiness_timeout',
+        )
+        raise Exception(
+            '注册页面在超时前未进入可用状态；已保存诊断信息：'
+            f'{diagnostics}'
+        )
 
     def _click_email_signup_button(self, timeout=20):
         """Click the email signup entry button after page loads.

@@ -39,8 +39,8 @@ export async function render(container) {
                         <input type="number" class="form-input" id="s-alias-retries" value="${s.max_retries_per_alias || 3}" min="1">
                     </div>
                     <div class="form-group">
-                        <label>并发注册 Worker 数</label>
-                        <input type="number" class="form-input" id="s-registration-concurrency" value="${s.registration_concurrency || 1}" min="1" max="10">
+                        <label>并发注册 Worker 数（稳定模式固定为 1）</label>
+                        <input type="number" class="form-input" id="s-registration-concurrency" value="1" min="1" max="1" readonly>
                     </div>
                 </div>
 
@@ -51,8 +51,8 @@ export async function render(container) {
                     <div class="form-group">
                         <label>浏览器运行模式</label>
                         <div class="radio-group">
-                            <label><input type="radio" name="headless" value="true" ${s.browser_headless === 'true' ? 'checked' : ''}> 无头模式 (后台运行)</label>
-                            <label><input type="radio" name="headless" value="false" ${s.browser_headless !== 'true' ? 'checked' : ''}> 有头模式 (前台可视)</label>
+                            <label><input type="radio" name="headless" value="true" ${s.browser_headless === 'true' ? 'checked' : ''}> 无头模式（可能被 Cloudflare 拦截）</label>
+                            <label><input type="radio" name="headless" value="false" ${s.browser_headless !== 'true' ? 'checked' : ''}> 有头 / Xvfb 模式（推荐）</label>
                         </div>
                     </div>
                     <div class="form-group">
