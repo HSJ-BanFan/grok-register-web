@@ -362,7 +362,9 @@ class RegistrationEngine:
             # 5. Fill profile
             self.state.check_pause()
             logger.info("Filling profile information...")
-            self._fill_profile(password, settings, alias_email=alias_email)
+            self._fill_profile(
+                password, settings, alias_email=alias_email, alias=alias,
+            )
 
             # 6. Extract SSO (turnstile is handled inside _fill_profile)
             logger.info("Extracting SSO token...")
@@ -838,6 +840,92 @@ return {clicked: true, label: (target.innerText || target.textContent || '').rep
             time.sleep(0.5)
         raise Exception('未找到邮箱注册入口按钮（支持：使用邮箱注册 / Sign up with email）')
 
+    def _click_existing_account_email_login(self, timeout=20):
+        """Click the email login button shown by xAI's Existing account page."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                for element in self.browser.page.eles(
+                    'css:button, a, [role="button"]'
+                ):
+                    label = str(element.text or '').strip()
+                    normalized = re.sub(r'\s+', ' ', label).lower()
+                    compact = normalized.replace(' ', '')
+                    if any(word in normalized for word in ('google', 'apple', 'cookie')):
+                        continue
+                    if (
+                        '使用邮箱登录' in label
+                        or '邮箱登录' in label
+                        or compact in (
+                            'loginwithemail',
+                            'log-inwithemail',
+                            'signinwithemail',
+                            'sign-inwithemail',
+                        )
+                        or 'login with email' in normalized
+                        or 'log in with email' in normalized
+                        or 'sign in with email' in normalized
+                    ):
+                        element.click()
+                        logger.info('Clicked existing-account email login natively: %s', label)
+                        return True
+            except Exception as exc:
+                logger.debug('Native email login click unavailable: %s', exc)
+            try:
+                already = self.browser.run_js(r"""
+return !!document.querySelector('input[type="email"], input[name="email"], input[autocomplete="email"]');
+                """)
+                if already:
+                    logger.info('Email input already visible on login page')
+                    return True
+
+                clicked = self.browser.run_js(r"""
+function normalize(text) {
+  return String(text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+function isEmailLoginLabel(text) {
+  const s = normalize(text);
+  const t = s.replace(/\s+/g, '');
+  if (!t) return false;
+  if (t.includes('使用邮箱登录') || t.includes('邮箱登录')) return true;
+  if (t.includes('loginwithemail') || t.includes('log-inwithemail')) return true;
+  if (t.includes('signinwithemail') || t.includes('sign-inwithemail')) return true;
+  if (s.includes('login with email') || s.includes('log in with email')) return true;
+  if (s.includes('sign in with email') || s.includes('sign-in with email')) return true;
+  return false;
+}
+const candidates = Array.from(document.querySelectorAll('button, a, [role="button"]'));
+const target = candidates.find((node) => {
+  const label = (node.innerText || node.textContent || '') + ' ' + (node.getAttribute('aria-label') || '');
+  return isEmailLoginLabel(label);
+});
+if (!target) {
+  return {
+    clicked: false,
+    labels: candidates.map(n => ((n.innerText || n.textContent || '') + ' ' + (n.getAttribute('aria-label') || '')).replace(/\s+/g, ' ').trim()).filter(Boolean).slice(0, 12)
+  };
+}
+try { target.scrollIntoView({block: 'center'}); } catch (e) {}
+target.click();
+return {clicked: true, label: (target.innerText || target.textContent || '').replace(/\s+/g, ' ').trim()};
+                """) or {}
+                if isinstance(clicked, dict) and clicked.get('clicked'):
+                    logger.info(
+                        'Clicked existing-account email login: %s',
+                        clicked.get('label') or '',
+                    )
+                    return True
+                if isinstance(clicked, dict) and clicked.get('labels'):
+                    logger.debug(
+                        'Existing-account login button candidates: %s',
+                        clicked.get('labels'),
+                    )
+            except Exception:
+                pass
+            self._dismiss_cookie_banner()
+            time.sleep(0.5)
+        raise Exception('未找到已有账号邮箱登录按钮（Login with email）')
+
     def _fill_email(self, email_addr, timeout=15):
         """Fill and submit the email form, preferring trusted browser input."""
         logger.info(f"Filling email: {email_addr}")
@@ -867,8 +955,15 @@ return {clicked: true, label: (target.innerText || target.textContent || '').rep
                         if any(word in normalized for word in ('google', 'apple', 'cookie')):
                             continue
                         if (
-                            compact in ('signup', 'sign-up', 'continue', 'next', 'submit', '注册')
-                            or normalized in ('sign up', 'sign-up')
+                            compact in (
+                                'signup', 'sign-up', 'continue', 'next',
+                                'submit', 'login', 'log-in', 'signin',
+                                'sign-in', '注册', '登录',
+                            )
+                            or normalized in (
+                                'sign up', 'sign-up', 'log in', 'login',
+                                'sign in', 'sign-in',
+                            )
                         ):
                             submit = element
                             break
@@ -963,7 +1058,9 @@ function isEmailSubmitLabel(text) {
     if (t === '注册' || t.includes('注册') || t.includes('继续') || t.includes('下一步')) return true;
     // English
     if (t === 'signup' || t === 'sign-up' || t === 'continue' || t === 'next' || t === 'submit') return true;
+    if (t === 'login' || t === 'log-in' || t === 'signin' || t === 'sign-in') return true;
     if (s === 'sign up' || s === 'sign-up' || s.includes('continue') || s.includes('next')) return true;
+    if (s === 'login' || s === 'log in' || s === 'sign in' || s === 'sign-in') return true;
     // Avoid social/oauth/cookie buttons
     if (s.includes('google') || s.includes('apple') || s.includes(' cookie') || s.includes('reject') || s.includes('accept all')) return false;
     return false;
@@ -979,7 +1076,8 @@ const buttons = Array.from(document.querySelectorAll('button[type="submit"], but
 let submitButton = buttons.find(n => {
     const text = n.innerText || n.textContent || '';
     const t = normalize(text).replace(/\s+/g, '');
-    return t === 'signup' || t === 'sign-up' || t === '注册';
+    return t === 'signup' || t === 'sign-up' || t === '注册'
+        || t === 'login' || t === 'log-in' || t === 'signin' || t === 'sign-in' || t === '登录';
 });
 if (!submitButton) {
     submitButton = buttons.find(n => isEmailSubmitLabel(n.innerText || n.textContent || ''));
@@ -1185,6 +1283,13 @@ return orderedBoxes.map(n => String(n.value || '').trim()).join('') === code ? '
                 continue
 
             if filled == 'not-ready':
+                completion = self._profile_completion_reason()
+                if completion:
+                    logger.info(
+                        "Already past verification code page, skipping code confirmation: %s",
+                        completion,
+                    )
+                    return
                 if (
                     self._has_profile_form()
                     and self._wait_for_stable_profile_form(timeout=3)
@@ -1260,6 +1365,13 @@ return 'clicked';
                     for _ in range(30):
                         time.sleep(0.5)
                         try:
+                            completion = self._profile_completion_reason()
+                            if completion:
+                                logger.info(
+                                    "Verification completed and session is available: %s",
+                                    completion,
+                                )
+                                return
                             if (
                                 self._has_profile_form()
                                 and self._wait_for_stable_profile_form(timeout=3)
@@ -1837,7 +1949,100 @@ return 'clicked-text:' + (btn.innerText || btn.value || '').trim().slice(0, 40);
             logger.warning(f"Cookie banner check: {e}")
         return False
 
-    def _fill_profile(self, password, settings, alias_email='', timeout=120):
+    def _detect_existing_account_notice(self):
+        """Return xAI's Existing account notice text from any live tab."""
+        script = r"""
+const body = String(document.body?.innerText || '').replace(/\s+/g, ' ').trim();
+const lower = body.toLowerCase();
+if (lower.includes('existing account found')
+    || lower.includes('an account already exists which is associated with this email address')) {
+  return body.slice(0, 500);
+}
+return '';
+        """
+        for tab in self._browser_tabs():
+            try:
+                notice = str(tab.run_js(script) or '').strip()
+                if notice:
+                    self._select_browser_tab(tab)
+                    return notice
+            except Exception:
+                pass
+        return ''
+
+    def _recover_existing_account_session(self, alias, settings):
+        """Log in to an xAI account that was created by a prior interrupted run."""
+        alias = alias or {}
+        alias_email = alias.get('alias_email') or ''
+        if not alias_email:
+            return False
+        try:
+            logger.info(
+                'Existing account found for %s; attempting email-login recovery',
+                alias_email,
+            )
+            self._click_existing_account_email_login()
+            requested_at = self._fill_email(alias_email)
+            logger.info('Requesting existing-account login verification code...')
+            code = self.email_mgr.get_code_for_alias(
+                alias_email,
+                alias.get('account_id'),
+                alias.get('client_id'),
+                alias.get('refresh_token'),
+                max_retries=max(
+                    MIN_VERIFICATION_CODE_POLLS,
+                    int(settings.get('max_code_retries', 3) or 3),
+                ),
+                main_email=alias.get('main_email'),
+                requested_after=requested_at,
+            )
+            logger.info('Filling existing-account login verification code: %s', code)
+            self._fill_and_confirm_code(code)
+
+            deadline = time.time() + 60
+            last_log = 0.0
+            while time.time() < deadline:
+                completion = self._profile_completion_reason()
+                if completion:
+                    logger.info(
+                        'Existing-account login recovered session: %s',
+                        completion,
+                    )
+                    return True
+                try:
+                    sso = self._check_sso_cookie()
+                    if sso:
+                        logger.info(
+                            'Existing-account login recovered SSO cookie (%s chars)',
+                            len(sso),
+                        )
+                        return True
+                except Exception:
+                    pass
+                now = time.time()
+                if now - last_log >= 10:
+                    last_log = now
+                    url = ''
+                    try:
+                        url = self.browser.page.url if self.browser.page else ''
+                    except Exception:
+                        pass
+                    logger.info(
+                        'Waiting for existing-account login SSO... URL: %s',
+                        url or 'unknown',
+                    )
+                time.sleep(1)
+            logger.warning('Existing-account login finished without an SSO cookie')
+        except Exception as exc:
+            logger.warning(
+                'Existing-account recovery failed for %s: %s',
+                alias_email,
+                exc,
+            )
+            logger.debug('Existing-account recovery traceback', exc_info=True)
+        return False
+
+    def _fill_profile(self, password, settings, alias_email='', alias=None, timeout=120):
         """Fill profile form (name + password) and submit with turnstile handling."""
         if settings.get('random_name_enabled', 'true') == 'true':
             first, last = self._generate_random_name()
@@ -1860,16 +2065,10 @@ return 'clicked-text:' + (btn.innerText || btn.value || '').trim().slice(0, 40);
                     )
                     return
                 self._dismiss_cookie_banner()
-                existing_account = self.browser.run_js(r"""
-const body = String(document.body?.innerText || '').replace(/\s+/g, ' ').trim();
-const lower = body.toLowerCase();
-if (lower.includes('existing account found')
-    || lower.includes('an account already exists which is associated with this email address')) {
-  return body.slice(0, 500);
-}
-return '';
-                """)
+                existing_account = self._detect_existing_account_notice()
                 if existing_account:
+                    if alias and self._recover_existing_account_session(alias, settings):
+                        return
                     raise ExistingAccountError(
                         '注册邮箱已存在：xAI reports Existing account found'
                     )
@@ -2205,6 +2404,19 @@ return {
                                 return
                         except Exception:
                             pass
+
+                        existing_account = self._detect_existing_account_notice()
+                        if existing_account:
+                            logger.warning(
+                                'Existing account page detected after profile submit; '
+                                'attempting recovery instead of waiting'
+                            )
+                            if alias and self._recover_existing_account_session(alias, settings):
+                                submit_stage = ProfileSubmitStage.SUCCEEDED
+                                return
+                            raise ExistingAccountError(
+                                '注册邮箱已存在：xAI reports Existing account found'
+                            )
 
                         try:
                             ui = _submit_ui_state() or {}
