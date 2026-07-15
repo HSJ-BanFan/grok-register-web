@@ -2,10 +2,11 @@ import os
 import sys
 import argparse
 import logging
+import secrets
 import webbrowser
 import threading
 
-from flask import Flask, render_template
+from flask import Flask, abort, render_template, request
 from flask_socketio import SocketIO
 
 from config import DEFAULT_HOST, DEFAULT_PORT
@@ -13,6 +14,7 @@ from core.database import Database
 from core.browser import BrowserManager
 from core.email_manager import EmailManager
 from core.oauth import OAuthManager
+from core.web_security import is_loopback_host, origin_matches_host
 from api.accounts import init_accounts_api
 from api.register import init_register_api
 from api.results import init_results_api
@@ -31,9 +33,14 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__,
             static_folder='static',
             template_folder='templates')
-app.config['SECRET_KEY'] = 'grok-register-local-key'
+app.config.update(
+    SECRET_KEY=os.environ.get('GROK_REGISTER_SECRET_KEY') or secrets.token_hex(32),
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Strict',
+)
 
-socketio = SocketIO(app, async_mode='threading', cors_allowed_origins='*')
+# Flask-SocketIO's default same-origin validation is intentional here.
+socketio = SocketIO(app, async_mode='threading')
 
 # ── Core modules ───────────────────────────────────────────
 db = Database()
@@ -57,6 +64,14 @@ register_logger = logging.getLogger('register')
 register_logger.setLevel(logging.INFO)
 register_logger.addHandler(socket_handler)
 
+
+@app.before_request
+def enforce_same_origin_for_writes():
+    if request.method in ('POST', 'PUT', 'PATCH', 'DELETE'):
+        origin = request.headers.get('Origin', '')
+        if origin and not origin_matches_host(origin, request.host):
+            abort(403)
+
 # ── Page route ─────────────────────────────────────────────
 @app.route('/')
 def index():
@@ -67,7 +82,15 @@ def main():
     parser = argparse.ArgumentParser(description='Grok Auto-Register Web Platform')
     parser.add_argument('--host', default=DEFAULT_HOST, help=f'Bind address (default: {DEFAULT_HOST})')
     parser.add_argument('--port', type=int, default=DEFAULT_PORT, help=f'Port (default: {DEFAULT_PORT})')
+    parser.add_argument(
+        '--allow-remote', action='store_true',
+        help='Allow binding to a non-loopback address (trusted networks only)',
+    )
     args = parser.parse_args()
+
+    is_loopback = is_loopback_host(args.host)
+    if not is_loopback and not args.allow_remote:
+        parser.error('Refusing non-loopback bind without --allow-remote')
 
     # Initialize database
     db.init_database()

@@ -41,7 +41,7 @@ def init_register_api(db, browser_mgr, email_mgr, socketio):
             settings = _db.get_settings()
             concurrency = int(data.get(
                 'concurrency',
-                settings.get('registration_concurrency', 2),
+                settings.get('registration_concurrency', 1),
             ))
             if concurrency < 1 or concurrency > 10:
                 raise ValueError('concurrency must be between 1 and 10')

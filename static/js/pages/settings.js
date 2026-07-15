@@ -40,7 +40,7 @@ export async function render(container) {
                     </div>
                     <div class="form-group">
                         <label>并发注册 Worker 数</label>
-                        <input type="number" class="form-input" id="s-registration-concurrency" value="${s.registration_concurrency || 2}" min="1" max="10">
+                        <input type="number" class="form-input" id="s-registration-concurrency" value="${s.registration_concurrency || 1}" min="1" max="10">
                     </div>
                 </div>
 

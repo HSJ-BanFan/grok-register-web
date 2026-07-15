@@ -43,6 +43,11 @@ class AliasBudgetLogicTest(unittest.TestCase):
         self.assertGreaterEqual(Database.ALIAS_FAILURE_BUDGET, 2)
         self.assertLessEqual(Database.ALIAS_FAILURE_BUDGET, 5)
 
+    def test_registration_defaults_to_single_worker(self):
+        self.assertEqual(
+            database_module.DEFAULT_SETTINGS['registration_concurrency'], '1',
+        )
+
 
 class LegacyAliasMigrationTest(unittest.TestCase):
     def test_adds_and_backfills_terminal_metadata(self):
@@ -222,7 +227,7 @@ class AccountDisablePolicyTest(unittest.TestCase):
         self.assertEqual(alias_row['status'], 'ready')
         self.assertEqual(alias_row['retry_count'], 0)
 
-    def test_recover_stale_marks_exhausted_alias_terminal_and_applies_budget(self):
+    def test_recover_stale_marks_registration_interrupted_without_consuming_retry(self):
         self.db.conn.execute(
             'UPDATE accounts SET max_aliases=1 WHERE id=?', (self.account_id,),
         )
@@ -252,16 +257,22 @@ class AccountDisablePolicyTest(unittest.TestCase):
 
         self.db.recover_stale(timeout_seconds=300)
 
+        registration = self.db.conn.execute(
+            'SELECT status, error_message FROM registrations WHERE id=?',
+            (reg_id,),
+        ).fetchone()
         alias_row = self.db.conn.execute(
             '''SELECT status, retry_count, failure_category, completed_at
                FROM aliases WHERE id=?''',
             (pending_alias_id,),
         ).fetchone()
-        self.assertEqual(alias_row['status'], 'failed')
-        self.assertEqual(alias_row['retry_count'], 1)
-        self.assertEqual(alias_row['failure_category'], 'registration')
-        self.assertTrue(alias_row['completed_at'])
-        self.assertEqual(self.db.get_account(self.account_id)['status'], 'disabled')
+        self.assertEqual(registration['status'], 'interrupted')
+        self.assertIn('interrupted', registration['error_message'].lower())
+        self.assertEqual(alias_row['status'], 'ready')
+        self.assertEqual(alias_row['retry_count'], 0)
+        self.assertEqual(alias_row['failure_category'], '')
+        self.assertIsNone(alias_row['completed_at'])
+        self.assertEqual(self.db.get_account(self.account_id)['status'], 'ready')
 
 
 if __name__ == '__main__':

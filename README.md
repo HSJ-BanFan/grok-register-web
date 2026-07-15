@@ -57,7 +57,7 @@ python app.py
 
 ```bash
 python app.py --port 8080
-python app.py --host 0.0.0.0 --port 5000   # 仅限可信网络
+python app.py --host 0.0.0.0 --port 5000 --allow-remote   # 仅限可信网络
 ```
 
 ### 3. 使用流程
@@ -117,6 +117,7 @@ grok-register/
 ├── config.py
 ├── requirements.txt
 ├── core/                 # 注册、激活、邮箱、浏览器、grok2api
+│   └── registration/     # 注册状态、资料提交状态机与诊断
 ├── api/                  # REST + WebSocket
 ├── static/               # 前端 SPA
 ├── templates/
@@ -131,6 +132,7 @@ grok-register/
 |--------|------|------|
 | 每账号最大别名数 | 每主邮箱成功上限 | 5 |
 | 每别名最大重试 | 失败重试次数 | 2–3 |
+| 注册并发 Worker 数 | 同时运行的浏览器数量 | **1** |
 | 浏览器模式 | 有头 / 无头 | 调试用有头 |
 | 浏览器代理 | 如 `http://127.0.0.1:7897` | 有代理建议填 |
 | 注册后打开 grok.com 做 Web 激活 | 每轮是否做人机激活 | **关闭** |
@@ -149,9 +151,11 @@ python -m unittest discover -s tests -v
 
 ## 注意事项
 
-- 默认绑定 `127.0.0.1`；`--host 0.0.0.0` 仅限可信网络  
+- 默认绑定 `127.0.0.1`；绑定非本机地址必须显式添加 `--allow-remote`
 - 需要本机已安装 Chrome / Chromium  
 - 账号、Token、密码仅存本地 `data/`，请勿把运行时数据提交到公开仓库  
+- 资料提交失败时会在 `data/diagnostics/` 保存状态 JSON 和页面截图
+- 启动恢复会把超时的 pending 记录标记为 `interrupted`，不会消耗 alias 重试次数
 - Cloudflare 托管挑战无法保证全自动，请用「推荐用法」分流  
 - 注册页出现 `[permission_denied] HTTP 403` 表示 xAI 拒绝了发送验证码请求，邮箱中不会产生新邮件。程序会立即停止并保留 alias/retry 预算；请等待风控解除或更换网络出口后再启动
 - 邮箱 Token 会自动识别 Microsoft Graph 与旧 Outlook REST 授权范围；无读取权限时会直接显示 OAuth/API 错误，不会切换到无关临时邮箱

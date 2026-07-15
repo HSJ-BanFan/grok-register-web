@@ -5,207 +5,27 @@ import string
 import random
 import secrets
 import re
-from contextlib import contextmanager
 
 from DrissionPage.errors import PageDisconnectedError
 from config import SIGNUP_URL
 from core.grok2api_client import upload_registered_sso
 from core.account_activation import activate_grok_web
+from core.registration.state import (
+    EMAIL_REQUEST_MIN_INTERVAL,
+    RegistrationState,
+    VerificationRequestError,
+    email_request_slot,
+    is_xai_permission_denied,
+    submit_is_in_flight,
+)
+from core.registration.profile import (
+    ProfileSubmitSnapshot,
+    ProfileSubmitStage,
+    classify_profile_submit,
+    save_profile_diagnostics,
+)
 
 logger = logging.getLogger('register')
-
-_EMAIL_REQUEST_LOCK = threading.Lock()
-_EMAIL_REQUEST_LAST_AT = 0.0
-EMAIL_REQUEST_MIN_INTERVAL = 12.0
-
-
-@contextmanager
-def email_request_slot(min_interval=EMAIL_REQUEST_MIN_INTERVAL):
-    """Serialize xAI send-code requests across concurrent browser workers."""
-    global _EMAIL_REQUEST_LAST_AT
-    with _EMAIL_REQUEST_LOCK:
-        wait_for = max(
-            0.0,
-            _EMAIL_REQUEST_LAST_AT + float(min_interval) - time.monotonic(),
-        )
-        if wait_for:
-            logger.info(
-                'Waiting %.1fs before next xAI verification-code request',
-                wait_for,
-            )
-            time.sleep(wait_for)
-        _EMAIL_REQUEST_LAST_AT = time.monotonic()
-        yield
-
-
-def submit_is_in_flight(ui_state):
-    """A post-click disabled primary button means the submit request still owns the form."""
-    state = ui_state or {}
-    return bool(state.get('loading') or state.get('primaryDisabled'))
-
-
-def is_xai_permission_denied(error):
-    text = str(error or '').lower()
-    return 'permission_denied' in text and '403' in text
-
-
-class VerificationRequestError(RuntimeError):
-    """xAI rejected or did not complete the send-code request."""
-
-
-class RegistrationState:
-    def __init__(self):
-        self._pause_event = threading.Event()
-        self._lock = threading.RLock()
-        self._stop_flag = False
-        self._pause_event.set()
-        self._status = 'stopped'
-        self._current_round = 0
-        self._legacy_current_email = ''
-        self._completed = 0
-        self._success = 0
-        self._failed = 0
-        self._active_workers = {}
-
-    @property
-    def status(self):
-        with self._lock:
-            return self._status
-
-    @status.setter
-    def status(self, value):
-        with self._lock:
-            self._status = value
-
-    @property
-    def current_round(self):
-        with self._lock:
-            return self._current_round
-
-    @current_round.setter
-    def current_round(self, value):
-        with self._lock:
-            self._current_round = value
-
-    @property
-    def current_email(self):
-        with self._lock:
-            if self._active_workers:
-                return ', '.join(
-                    item['email'] for item in self._active_workers.values()
-                )
-            return self._legacy_current_email
-
-    @current_email.setter
-    def current_email(self, value):
-        with self._lock:
-            self._legacy_current_email = value or ''
-
-    @property
-    def completed(self):
-        with self._lock:
-            return self._completed
-
-    @completed.setter
-    def completed(self, value):
-        with self._lock:
-            self._completed = value
-
-    @property
-    def success(self):
-        with self._lock:
-            return self._success
-
-    @success.setter
-    def success(self, value):
-        with self._lock:
-            self._success = value
-
-    @property
-    def failed(self):
-        with self._lock:
-            return self._failed
-
-    @failed.setter
-    def failed(self, value):
-        with self._lock:
-            self._failed = value
-
-    def check_pause(self):
-        self._pause_event.wait()
-
-    def should_stop(self):
-        with self._lock:
-            return self._stop_flag
-
-    def reserve_round(self, max_rounds=0):
-        with self._lock:
-            if max_rounds > 0 and self._current_round >= max_rounds:
-                return None
-            self._current_round += 1
-            return self._current_round
-
-    def set_worker_active(self, worker_id, round_number, alias):
-        with self._lock:
-            self._active_workers[worker_id] = {
-                'worker_id': worker_id,
-                'round': round_number,
-                'email': alias['alias_email'],
-                'account_id': alias['account_id'],
-                'alias_id': alias['id'],
-            }
-            self._legacy_current_email = ''
-
-    def clear_worker(self, worker_id):
-        with self._lock:
-            self._active_workers.pop(worker_id, None)
-
-    def record_success(self):
-        with self._lock:
-            self._success += 1
-            self._completed += 1
-
-    def record_failure(self):
-        with self._lock:
-            self._failed += 1
-            self._completed += 1
-
-    def pause(self):
-        self._pause_event.clear()
-        with self._lock:
-            self._status = 'paused'
-        logger.info("Registration paused")
-
-    def resume(self):
-        self._pause_event.set()
-        with self._lock:
-            self._status = 'running'
-        logger.info("Registration resumed")
-
-    def stop(self):
-        with self._lock:
-            self._stop_flag = True
-            self._status = 'stopped'
-        self._pause_event.set()
-        logger.info("Registration stop requested")
-
-    def get_snapshot(self):
-        with self._lock:
-            workers = [
-                dict(item) for _, item in sorted(self._active_workers.items())
-            ]
-            current_email = ', '.join(item['email'] for item in workers)
-            if not current_email:
-                current_email = self._legacy_current_email
-            return {
-                'status': self._status,
-                'current_round': self._current_round,
-                'current_email': current_email,
-                'active_workers': workers,
-                'completed': self._completed,
-                'success': self._success,
-                'failed': self._failed,
-            }
 
 
 class RegistrationEngine:
@@ -1269,6 +1089,24 @@ return !!(givenInput && familyInput && passwordInput);
         except Exception:
             return False
 
+    def _save_profile_diagnostics(self, stage, snapshot=None, reason=''):
+        try:
+            result = save_profile_diagnostics(
+                self.browser.page,
+                stage,
+                snapshot=snapshot,
+                reason=reason,
+            )
+            logger.warning(
+                'Profile diagnostics saved: json=%s screenshot=%s',
+                result.get('json') or 'none',
+                result.get('screenshot') or 'none',
+            )
+            return result
+        except Exception as exc:
+            logger.warning('Failed to save profile diagnostics: %s', exc)
+            return {}
+
     def _dismiss_cookie_banner(self):
         """Dismiss OneTrust/cookie consent banners that block form submit."""
         try:
@@ -1611,6 +1449,8 @@ if (b) {
                         logger.warning(f"Submit button issue: {clicked}")
 
                     logger.info(f"Filled profile: {first} {last}")
+                    submit_stage = ProfileSubmitStage.SUBMITTED
+                    last_snapshot = ProfileSubmitSnapshot()
 
                     def _submit_ui_state():
                         """Detect post-submit loading / success / error on the profile page."""
@@ -1665,10 +1505,16 @@ return {
                     last_state_log = 0
                     while time.time() < wait_deadline:
                         if self.state.should_stop():
+                            submit_stage = ProfileSubmitStage.STOPPED
+                            self._save_profile_diagnostics(
+                                submit_stage, last_snapshot,
+                                'Registration stop requested during profile submit wait',
+                            )
                             raise Exception("Registration stop requested during submit wait")
                         try:
                             url = self.browser.page.url
                             if 'sign-up' not in url and 'signup' not in url:
+                                submit_stage = ProfileSubmitStage.SUCCEEDED
                                 logger.info(f"Registration submitted, page: {url}")
                                 return
                         except Exception:
@@ -1676,6 +1522,7 @@ return {
                         try:
                             sso_early = self._check_sso_cookie()
                             if sso_early:
+                                submit_stage = ProfileSubmitStage.SUCCEEDED
                                 logger.info(f"SSO cookie detected early ({len(sso_early)} chars)")
                                 return
                         except Exception:
@@ -1685,23 +1532,31 @@ return {
                             ui = _submit_ui_state() or {}
                         except Exception:
                             ui = {}
-                        in_flight = submit_is_in_flight(ui)
+                        last_snapshot = ProfileSubmitSnapshot.from_mapping(ui)
+                        submit_stage = classify_profile_submit(last_snapshot)
+                        in_flight = last_snapshot.in_flight
                         if in_flight:
                             saw_loading = True
                             if not loading_deadline_extended:
                                 wait_deadline = wait_started + 180
                                 loading_deadline_extended = True
                                 logger.info("Submit is loading; extending wait to 180s and keeping page untouched")
-                        if ui.get('errText'):
-                            raise Exception(f"注册提交失败: {ui['errText']}")
+                        if last_snapshot.error_text:
+                            submit_stage = ProfileSubmitStage.FAILED
+                            self._save_profile_diagnostics(
+                                submit_stage, last_snapshot,
+                                last_snapshot.error_text,
+                            )
+                            raise Exception(f"注册提交失败: {last_snapshot.error_text}")
 
                         now = time.time()
                         if now - last_state_log >= 5:
                             last_state_log = now
                             logger.info(
                                 f"Post-submit wait: loading={in_flight} "
-                                f"btn='{ui.get('primaryText')}' disabled={ui.get('primaryDisabled')} "
-                                f"cfLen={ui.get('cfLen')} turnstileOk={ui.get('turnstileOk')}"
+                                f"stage={submit_stage.value} "
+                                f"btn='{last_snapshot.primary_text}' disabled={last_snapshot.primary_disabled} "
+                                f"cfLen={last_snapshot.cf_length} turnstileOk={last_snapshot.turnstile_ok}"
                             )
 
                         # If we previously saw loading and it finished, give a short grace period then exit loop
@@ -1711,6 +1566,7 @@ return {
                             try:
                                 url = self.browser.page.url
                                 if 'sign-up' not in url and 'signup' not in url:
+                                    submit_stage = ProfileSubmitStage.SUCCEEDED
                                     logger.info(f"Registration submitted after loading, page: {url}")
                                     return
                             except Exception:
@@ -1718,6 +1574,7 @@ return {
                             try:
                                 sso_early = self._check_sso_cookie()
                                 if sso_early:
+                                    submit_stage = ProfileSubmitStage.SUCCEEDED
                                     logger.info(f"SSO cookie after loading end ({len(sso_early)} chars)")
                                     return
                             except Exception:
@@ -1729,31 +1586,52 @@ return {
                     # Diagnostics (never reload while still loading — that kills the API call)
                     try:
                         ui = _submit_ui_state() or {}
-                        logger.warning(f"Submit diagnostics: {ui}")
+                        last_snapshot = ProfileSubmitSnapshot.from_mapping(ui)
+                        logger.warning(
+                            'Submit diagnostics: %s', last_snapshot,
+                        )
                     except Exception as e:
                         ui = {}
+                        last_snapshot = ProfileSubmitSnapshot()
                         logger.warning(f"Submit diagnostics failed: {e}")
 
-                    if submit_is_in_flight(ui):
+                    submit_stage = classify_profile_submit(
+                        last_snapshot, timed_out=True,
+                    )
+                    if submit_stage == ProfileSubmitStage.TIMED_OUT:
                         # Still spinning after the extended deadline — leave page alone and
                         # propagate the failure; never loop back into another click attempt.
                         logger.warning("Submit still loading after 180s; not reloading (would abort request)")
+                        self._save_profile_diagnostics(
+                            submit_stage, last_snapshot,
+                            'Profile submit remained in flight past deadline',
+                        )
                         raise Exception("注册提交超时（按钮一直 loading），需要重新尝试")
 
-                    if ui.get('errText'):
-                        raise Exception(f"注册提交失败: {ui['errText']}")
+                    if submit_stage == ProfileSubmitStage.FAILED:
+                        self._save_profile_diagnostics(
+                            submit_stage, last_snapshot,
+                            last_snapshot.error_text,
+                        )
+                        raise Exception(f"注册提交失败: {last_snapshot.error_text}")
 
                     # Only soft-refresh if request clearly finished and still stuck on sign-up
                     logger.info("No navigation after submit (not loading); soft check only, no forced reload")
                     try:
                         sso_after = self._check_sso_cookie()
                         if sso_after:
+                            submit_stage = ProfileSubmitStage.SUCCEEDED
                             logger.info(f"SSO cookie found without navigation ({len(sso_after)} chars)")
                             return
                     except Exception:
                         pass
 
                     logger.warning("Submission appears to have failed (no navigation, no SSO, not loading).")
+                    submit_stage = ProfileSubmitStage.STALLED
+                    self._save_profile_diagnostics(
+                        submit_stage, last_snapshot,
+                        'No navigation, SSO cookie, loading state, or visible error',
+                    )
                     raise Exception("注册提交未生效（页面未跳转且无SSO），需要重新尝试")
 
             except Exception as e:

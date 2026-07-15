@@ -18,7 +18,7 @@ DEFAULT_SETTINGS = {
     'max_confirm_retries': '3',
     'max_retries_per_alias': '3',
     'registration_timeout': '300',
-    'registration_concurrency': '2',
+    'registration_concurrency': '1',
     'browser_headless': 'false',
     'turnstile_auto': 'true',
     'random_name_enabled': 'true',
@@ -425,9 +425,9 @@ class Database:
         self._disable_account_locked(cursor, account_id, reason)
         return True, reason, account
 
-    def _recover_expired_alias_leases_locked(self, cursor, max_retries, now_iso=None):
+    def _recover_expired_alias_leases_locked(self, cursor, _max_retries, now_iso=None):
         now_iso = now_iso or datetime.now().isoformat()
-        error = 'Registration worker lease expired'
+        error = 'Registration interrupted: worker lease expired'
         rows = cursor.execute(
             '''SELECT id, account_id, retry_count FROM aliases
                WHERE status='processing'
@@ -438,43 +438,24 @@ class Database:
         recovered = []
         for row in rows:
             cursor.execute(
-                '''UPDATE registrations SET status='failed', error_message=?
+                '''UPDATE registrations SET status='interrupted', error_message=?
                    WHERE alias_id=? AND status='pending' ''',
                 (error, row['id']),
             )
-            retry_count = int(row['retry_count'] or 0) + 1
-            terminal = retry_count >= max_retries
-            if terminal:
-                cursor.execute(
-                    '''UPDATE aliases SET status='failed', retry_count=?, error_reason=?,
-                       failure_category=?, completed_at=?, used_at=NULL,
-                       lease_owner='', lease_expires_at=NULL WHERE id=?''',
-                    (
-                        retry_count,
-                        error,
-                        classify_failure(error),
-                        now_iso,
-                        row['id'],
-                    ),
-                )
-                disabled, reason, _ = self._maybe_disable_unusable_account_locked(
-                    cursor, row['account_id'],
-                )
-            else:
-                cursor.execute(
-                    '''UPDATE aliases SET status='ready', retry_count=?, error_reason='',
-                       failure_category='', completed_at=NULL, used_at=NULL,
-                       lease_owner='', lease_expires_at=NULL WHERE id=?''',
-                    (retry_count, row['id']),
-                )
-                disabled, reason = False, ''
+            retry_count = int(row['retry_count'] or 0)
+            cursor.execute(
+                '''UPDATE aliases SET status='ready', retry_count=?, error_reason='',
+                   failure_category='', completed_at=NULL, used_at=NULL,
+                   lease_owner='', lease_expires_at=NULL WHERE id=?''',
+                (retry_count, row['id']),
+            )
             recovered.append({
                 'alias_id': row['id'],
                 'account_id': row['account_id'],
                 'retry_count': retry_count,
-                'terminal': terminal,
-                'account_disabled': disabled,
-                'disable_reason': reason,
+                'terminal': False,
+                'account_disabled': False,
+                'disable_reason': '',
             })
         return recovered
 
@@ -1040,19 +1021,14 @@ class Database:
         return recovered
 
     def recover_stale(self, timeout_seconds):
-        recovery_error = 'Timeout on startup recovery'
+        recovery_error = 'Registration interrupted: stale pending record recovered on startup'
         cutoff_modifier = f'-{max(0, int(timeout_seconds))} seconds'
-        settings = self.get_settings()
-        max_retries = int(settings.get(
-            'max_retries_per_alias',
-            DEFAULT_SETTINGS['max_retries_per_alias'],
-        ))
         with self._write_lock:
             cur = self.conn.cursor()
             try:
                 cur.execute('BEGIN IMMEDIATE')
                 expired = self._recover_expired_alias_leases_locked(
-                    cur, max_retries,
+                    cur, 0,
                 )
                 # Let SQLite compare timestamps in UTC. CURRENT_TIMESTAMP is UTC.
                 stale = cur.execute(
@@ -1062,47 +1038,19 @@ class Database:
                          AND julianday(r.created_at) < julianday('now', ?)''',
                     (cutoff_modifier,),
                 ).fetchall()
-                alias_ids = {row['alias_id'] for row in stale if row['alias_id']}
                 for row in stale:
                     cur.execute(
-                        '''UPDATE registrations SET status='failed', error_message=?
+                        '''UPDATE registrations SET status='interrupted', error_message=?
                            WHERE id=?''',
                         (recovery_error, row['id']),
                     )
-
-                for alias_id in alias_ids:
-                    alias = cur.execute(
-                        'SELECT account_id, retry_count, status FROM aliases WHERE id=?',
-                        (alias_id,),
-                    ).fetchone()
-                    if not alias or alias['status'] in ('used', 'failed'):
-                        continue
-                    retry_count = int(alias['retry_count'] or 0) + 1
-                    if retry_count < max_retries:
+                    if row['alias_id']:
                         cur.execute(
-                            '''UPDATE aliases SET status='ready', retry_count=?,
-                               error_reason='', failure_category='', used_at=NULL,
-                               completed_at=NULL, lease_owner='', lease_expires_at=NULL
-                               WHERE id=?''',
-                            (retry_count, alias_id),
-                        )
-                    else:
-                        completed_at = datetime.now().isoformat()
-                        cur.execute(
-                            '''UPDATE aliases SET status='failed', retry_count=?,
-                               error_reason=?, failure_category=?, used_at=NULL,
-                               completed_at=?, lease_owner='', lease_expires_at=NULL
-                               WHERE id=?''',
-                            (
-                                retry_count,
-                                recovery_error,
-                                classify_failure(recovery_error),
-                                completed_at,
-                                alias_id,
-                            ),
-                        )
-                        self._maybe_disable_unusable_account_locked(
-                            cur, alias['account_id'],
+                            '''UPDATE aliases SET status='ready', error_reason='',
+                               failure_category='', used_at=NULL, completed_at=NULL,
+                               lease_owner='', lease_expires_at=NULL
+                               WHERE id=? AND status NOT IN ('used', 'failed')''',
+                            (row['alias_id'],),
                         )
                 self.conn.commit()
             except Exception:

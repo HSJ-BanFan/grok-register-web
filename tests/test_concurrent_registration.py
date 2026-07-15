@@ -111,7 +111,7 @@ class ConcurrentAliasClaimTest(unittest.TestCase):
         )
 
         self.assertEqual(reclaimed['id'], first['id'])
-        self.assertEqual(reclaimed['retry_count'], 1)
+        self.assertEqual(reclaimed['retry_count'], 0)
         alias = self.db.conn.execute(
             '''SELECT status, retry_count, lease_owner
                FROM aliases WHERE id=?''',
@@ -122,9 +122,9 @@ class ConcurrentAliasClaimTest(unittest.TestCase):
             (reg_id,),
         ).fetchone()
         self.assertEqual(alias['status'], 'processing')
-        self.assertEqual(alias['retry_count'], 1)
+        self.assertEqual(alias['retry_count'], 0)
         self.assertEqual(alias['lease_owner'], 'replacement-worker')
-        self.assertEqual(registration['status'], 'failed')
+        self.assertEqual(registration['status'], 'interrupted')
         self.assertIn('lease expired', registration['error_message'].lower())
 
     def test_failure_transition_updates_retry_and_alias_atomically(self):

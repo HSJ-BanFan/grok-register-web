@@ -94,7 +94,7 @@ export async function render(container) {
 async function startRegistration() {
     const settingsRes = await api('GET', '/api/settings');
     const maxRetries = settingsRes.success ? parseInt(settingsRes.data.max_retries_per_alias) || 3 : 3;
-    const concurrency = settingsRes.success ? parseInt(settingsRes.data.registration_concurrency) || 2 : 2;
+    const concurrency = settingsRes.success ? parseInt(settingsRes.data.registration_concurrency) || 1 : 1;
     const res = await api('POST', '/api/register/start', {
         max_rounds: 0,
         max_retries: maxRetries,
