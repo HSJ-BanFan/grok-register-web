@@ -4,6 +4,18 @@
 
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 修复
+
+- Linux 服务器新增 `scripts/run_with_xvfb.sh`，使用虚拟显示器运行普通有头 Chrome，并强制单 Worker
+- 浏览器启动前验证代理端口是否能从当前进程/容器网络命名空间访问，代理日志自动移除用户名和密码
+- 注册入口新增 Cloudflare 硬拦截、代理错误页和普通挑战页分类
+- 环境拦截会保存 `data/diagnostics/signup-*.json/.png`，立即停止任务并释放 alias，不消耗注册重试次数
+- 注册页未就绪时不再忽略超时并继续误报“未找到邮箱注册入口按钮”
+
+相关问题：[Issue #3](https://github.com/HSJ-BanFan/grok-register-web/issues/3)
+
 ## [v0.1.0] - 2026-07-15
 
 本次更新集中处理社区反馈的验证码发码 403、OTP 后资料页卡住、注册成功误判失败，以及 grok2api 导入和转换过程不可见等问题。

@@ -15,6 +15,13 @@ from .profile import (
     classify_profile_submit,
     save_profile_diagnostics,
 )
+from .signup import (
+    SignupEnvironmentError,
+    SignupPageSnapshot,
+    SignupPageStage,
+    classify_signup_page,
+    save_signup_diagnostics,
+)
 
 __all__ = [
     'EMAIL_REQUEST_MIN_INTERVAL',
@@ -28,4 +35,9 @@ __all__ = [
     'ProfileSubmitStage',
     'classify_profile_submit',
     'save_profile_diagnostics',
+    'SignupEnvironmentError',
+    'SignupPageSnapshot',
+    'SignupPageStage',
+    'classify_signup_page',
+    'save_signup_diagnostics',
 ]

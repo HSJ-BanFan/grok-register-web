@@ -4,6 +4,7 @@ import time
 
 from core.account_activation import activate_grok_web, clear_sso_cookies
 from core.grok2api_client import Grok2APIClient, Grok2APIError
+from core.runtime import resolve_browser_headless
 
 
 logger = logging.getLogger('register')
@@ -28,7 +29,7 @@ class BatchActivationEngine:
     def run(self, limit=0, ids=None):
         self.state.status = 'running'
         settings = self.db.get_settings()
-        headless = settings.get('browser_headless', 'false') == 'true'
+        headless = resolve_browser_headless(settings)
 
         records = self._load_records(ids=ids, limit=limit)
         total = len(records)

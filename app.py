@@ -11,8 +11,9 @@ from flask_socketio import SocketIO
 
 from config import DEFAULT_HOST, DEFAULT_PORT
 from core.database import Database
-from core.browser import BrowserManager
+from core.browser import BrowserManager, redact_proxy_url
 from core.email_manager import EmailManager
+from core.runtime import resolve_browser_headless
 from core.oauth import OAuthManager
 from core.web_security import is_loopback_host, origin_matches_host
 from api.accounts import init_accounts_api
@@ -101,11 +102,10 @@ def main():
     db.recover_stale(timeout)
 
     # Update browser headless / proxy settings
-    if settings.get('browser_headless', 'false') == 'true':
-        browser_mgr.headless = True
+    browser_mgr.headless = resolve_browser_headless(settings)
     browser_mgr.proxy = (settings.get('browser_proxy', '') or '').strip()
     if browser_mgr.proxy:
-        logger.info(f"Browser proxy configured: {browser_mgr.proxy}")
+        logger.info('Browser proxy configured: %s', redact_proxy_url(browser_mgr.proxy))
 
     url = f'http://{"localhost" if args.host in ("127.0.0.1", "0.0.0.0") else args.host}:{args.port}'
     logger.info(f"Starting Grok Register Platform at {url}")
