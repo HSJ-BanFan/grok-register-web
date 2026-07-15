@@ -2,9 +2,12 @@ import unittest
 from unittest.mock import Mock, patch
 
 from core.account_activation import (
+    CloudflareContext,
     _extract_browser_context,
     _set_tos,
+    capture_cloudflare_context,
     inject_sso_cookie,
+    restore_cloudflare_context,
     switch_sso_cookie,
     activate_grok_web,
 )
@@ -27,6 +30,42 @@ class AccountActivationTest(unittest.TestCase):
 
         self.assertEqual(cookies, 'cf_clearance=clearance; __cf_bm=bm')
         self.assertEqual(user_agent, 'Registered Browser UA')
+
+    def test_capture_cloudflare_context_returns_reusable_material(self):
+        class Page:
+            def cookies(self, **kwargs):
+                return [{'name': 'cf_clearance', 'value': 'clearance', 'domain': '.grok.com'}]
+
+            def run_js(self, script):
+                return 'Registered Browser UA'
+
+        context = capture_cloudflare_context(Page())
+
+        self.assertTrue(context.ready)
+        self.assertEqual(context.user_agent, 'Registered Browser UA')
+        self.assertEqual(context.cloudflare_cookies, 'cf_clearance=clearance')
+
+    def test_restore_cloudflare_context_sets_grok_domain_cookies(self):
+        page = Mock()
+        page.run_cdp = Mock()
+        page.set = Mock()
+        page.set.cookies = Mock()
+
+        restored = restore_cloudflare_context(
+            page,
+            CloudflareContext(
+                user_agent='Registered Browser UA',
+                cloudflare_cookies='cf_clearance=clearance; __cf_bm=bm',
+            ),
+        )
+
+        self.assertTrue(restored)
+        set_calls = [
+            call for call in page.run_cdp.call_args_list
+            if call.args and call.args[0] == 'Network.setCookie'
+        ]
+        self.assertEqual({call.kwargs['name'] for call in set_calls}, {'cf_clearance', '__cf_bm'})
+        page.set.cookies.assert_called_once()
 
     def test_inject_sso_cookie_sets_cdp_and_page_cookies(self):
         page = Mock()
@@ -107,6 +146,7 @@ class AccountActivationTest(unittest.TestCase):
         page.set.cookies.remove = Mock()
 
         with patch('core.account_activation._set_tos', return_value=True) as set_tos, \
+             patch('core.account_activation.restore_cloudflare_context') as restore_cf, \
              patch('core.account_activation.requests.Session') as session_cls:
             session = Mock()
             session.headers = {}
@@ -116,6 +156,10 @@ class AccountActivationTest(unittest.TestCase):
                 browser,
                 'historical-sso',
                 proxy_url='http://proxy.example:8080',
+                cloudflare_context=CloudflareContext(
+                    user_agent='Mozilla/5.0 TestUA',
+                    cloudflare_cookies='cf_clearance=clearance',
+                ),
             )
 
         self.assertTrue(result.ready)
@@ -131,6 +175,7 @@ class AccountActivationTest(unittest.TestCase):
         )
         cookie_names = {call.args[0] for call in session.cookies.set.call_args_list}
         self.assertEqual(cookie_names, {'sso', 'sso-rw', 'cf_clearance', '__cf_bm'})
+        restore_cf.assert_called_once()
 
     def test_activate_ready_when_probe_501_but_tos_and_session_ok(self):
         browser = Mock()

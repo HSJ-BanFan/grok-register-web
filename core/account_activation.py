@@ -19,6 +19,21 @@ class ActivationContext:
     cloudflare_cookies: str = ''
 
 
+@dataclass(frozen=True)
+class CloudflareContext:
+    """Browser trust material that can be reused for the same egress."""
+
+    user_agent: str = ''
+    cloudflare_cookies: str = ''
+
+    @property
+    def ready(self):
+        return bool(
+            self.user_agent.strip()
+            and 'cf_clearance=' in self.cloudflare_cookies
+        )
+
+
 def _birth_date():
     today = date.today()
     return f'{today.year-random.randint(20, 40)}-{random.randint(1, 12):02d}-{random.randint(1, 28):02d}T16:00:00.000Z'
@@ -43,6 +58,67 @@ def _extract_browser_context(page):
             allowed.append(f'{name}={value}')
     user_agent = str(page.run_js('return navigator.userAgent;') or '').strip()
     return '; '.join(allowed), user_agent
+
+
+def capture_cloudflare_context(page):
+    """Capture grok.com clearance and the UA from the current browser page."""
+    cookies, user_agent = _extract_browser_context(page)
+    return CloudflareContext(
+        user_agent=user_agent,
+        cloudflare_cookies=cookies,
+    )
+
+
+def restore_cloudflare_context(page, context):
+    """Restore a previously captured grok.com context into a browser page.
+
+    Cloudflare clearance is still bound to the network egress and browser UA;
+    restoring it only avoids throwing away a valid context when we recycle a
+    tab or restart the registration browser.
+    """
+    if not context or not context.ready:
+        return False
+
+    cookie_items = []
+    for part in context.cloudflare_cookies.split(';'):
+        name, _, value = part.strip().partition('=')
+        if not name or not value or name not in {'cf_clearance', '__cf_bm'}:
+            continue
+        cookie_items.append((name, value))
+
+    restored = False
+    for name, value in cookie_items:
+        try:
+            page.run_cdp(
+                'Network.setCookie',
+                name=name,
+                value=value,
+                domain='.grok.com',
+                path='/',
+                secure=True,
+                httpOnly=True,
+                sameSite='None',
+            )
+            restored = True
+        except Exception as exc:
+            logger.debug('Failed to restore %s Cloudflare cookie: %s', name, exc)
+
+    if cookie_items:
+        try:
+            page.set.cookies([
+                {
+                    'name': name,
+                    'value': value,
+                    'domain': '.grok.com',
+                    'path': '/',
+                    'secure': True,
+                }
+                for name, value in cookie_items
+            ])
+            restored = True
+        except Exception as exc:
+            logger.debug('page.set.cookies Cloudflare restore fallback failed: %s', exc)
+    return restored
 
 
 def _try_click_turnstile(page):
@@ -284,11 +360,14 @@ def _safe_run_js(page, script, *args, timeout=20, default=None):
 
 
 def activate_grok_web(browser, sso_cookie, timeout=60, reuse_cloudflare=True,
-                      proxy_url=''):
+                      proxy_url='', cloudflare_context=None):
     page = browser.page
     sso = (sso_cookie or '').strip()
     if not sso:
         return ActivationContext(False, 'SSO cookie is empty')
+
+    if reuse_cloudflare and cloudflare_context and cloudflare_context.ready:
+        restore_cloudflare_context(page, cloudflare_context)
 
     try:
         existing_cf, _ = _extract_browser_context(page)

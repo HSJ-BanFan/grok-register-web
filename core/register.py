@@ -11,7 +11,13 @@ from urllib.parse import urlparse
 from DrissionPage.errors import PageDisconnectedError
 from config import SIGNUP_URL
 from core.grok2api_client import upload_registered_sso
-from core.account_activation import activate_grok_web
+from core.account_activation import (
+    CloudflareContext,
+    activate_grok_web,
+    capture_cloudflare_context,
+    clear_sso_cookies,
+    restore_cloudflare_context,
+)
 from core.registration.state import (
     EMAIL_REQUEST_MIN_INTERVAL,
     ExistingAccountError,
@@ -46,6 +52,9 @@ class RegistrationEngine:
         self.socketio = socketio
         self.state = state
         self._cookie_banner_dismissed = False
+        # Kept per registration worker so a successful first challenge can be
+        # reused after tab/profile recycling on the same egress.
+        self._cloudflare_context = None
 
     def run(self, max_rounds=0, max_retries=3, concurrency=1):
         self.state.status = 'running'
@@ -212,18 +221,60 @@ class RegistrationEngine:
             logger.warning(f"Refresh page failed: {e}, restarting browser")
             self.browser.start()
 
-    def _restart_browser(self, force_close=False):
-        """Clear cookies/cache, optionally close and reopen browser."""
+    def _capture_cloudflare_context(self, page=None):
+        page = page or self.browser.page
         try:
-            page = self.browser.page
+            context = capture_cloudflare_context(page)
+        except Exception as exc:
+            logger.debug('Could not capture registration Cloudflare context: %s', exc)
+            return self._cloudflare_context
+        if context.ready:
+            self._cloudflare_context = context
+            logger.info('Captured reusable grok.com Cloudflare context from registration browser')
+        return self._cloudflare_context
+
+    def _restore_cloudflare_context(self, page=None):
+        if not self._cloudflare_context or not self._cloudflare_context.ready:
+            return False
+        page = page or self.browser.page
+        try:
+            restored = restore_cloudflare_context(page, self._cloudflare_context)
+            if restored:
+                logger.info('Restored grok.com Cloudflare context into registration browser')
+            return restored
+        except Exception as exc:
+            logger.debug('Could not restore registration Cloudflare context: %s', exc)
+            return False
+
+    def _restart_browser(self, force_close=False, preserve_cloudflare=True):
+        """Recycle the page while retaining a valid grok.com trust context."""
+        page = self.browser.page
+        context = self._capture_cloudflare_context(page) if preserve_cloudflare else None
+        keep_cloudflare = bool(context and context.ready)
+        try:
             if page:
-                page.run_cdp('Network.clearBrowserCookies')
-                page.run_cdp('Network.clearBrowserCache')
-                for origin in ['https://accounts.x.ai', 'https://grok.com', 'https://auth.x.ai', 'https://x.ai']:
-                    try:
-                        page.run_cdp('Storage.clearDataForOrigin', origin=origin, storageTypes='all')
-                    except Exception:
-                        pass
+                if keep_cloudflare:
+                    # Remove account identity and site state, but do not clear
+                    # grok.com cookies/cache containing cf_clearance.
+                    clear_sso_cookies(page)
+                    for origin in ['https://accounts.x.ai', 'https://auth.x.ai', 'https://x.ai']:
+                        try:
+                            page.run_cdp(
+                                'Storage.clearDataForOrigin',
+                                origin=origin,
+                                storageTypes='all',
+                            )
+                        except Exception:
+                            pass
+                    logger.info('Preserving grok.com Cloudflare context while recycling browser')
+                else:
+                    page.run_cdp('Network.clearBrowserCookies')
+                    page.run_cdp('Network.clearBrowserCache')
+                    for origin in ['https://accounts.x.ai', 'https://grok.com', 'https://auth.x.ai', 'https://x.ai']:
+                        try:
+                            page.run_cdp('Storage.clearDataForOrigin', origin=origin, storageTypes='all')
+                        except Exception:
+                            pass
         except Exception:
             pass
 
@@ -234,6 +285,7 @@ class RegistrationEngine:
                 pass
             time.sleep(1.5)
             self.browser.start()
+            self._restore_cloudflare_context()
             self._cookie_banner_dismissed = False
             logger.info("Browser restarted (force close)")
         else:
@@ -246,6 +298,7 @@ class RegistrationEngine:
                     except Exception:
                         pass
                     self.browser._page = new_page
+                    self._restore_cloudflare_context(new_page)
                     self._cookie_banner_dismissed = False
             except Exception:
                 pass
@@ -306,6 +359,11 @@ class RegistrationEngine:
             logger.info("Extracting SSO token...")
             sso = self._extract_sso()
 
+            # The signup redirect may already have established grok.com
+            # clearance. Capture it before activation/navigation changes the
+            # page, then keep it for subsequent aliases on this worker.
+            self._capture_cloudflare_context()
+
             # Once SSO is obtained, registration is successful.
             # Web activation / CF challenge must NEVER fail the whole round —
             # otherwise we lose a good account and skip grok2api upload.
@@ -317,7 +375,13 @@ class RegistrationEngine:
                         self.browser,
                         sso,
                         proxy_url=(settings.get('browser_proxy', '') or '').strip(),
+                        cloudflare_context=self._cloudflare_context,
                     )
+                    if activation and activation.cloudflare_cookies:
+                        self._cloudflare_context = CloudflareContext(
+                            user_agent=activation.user_agent,
+                            cloudflare_cookies=activation.cloudflare_cookies,
+                        )
                     if activation and activation.ready:
                         logger.info(f'Grok Web activation completed: {activation.message}')
                     else:
@@ -341,10 +405,17 @@ class RegistrationEngine:
             success_committed = True
 
             try:
+                upload_context = self._cloudflare_context
                 upload_result = upload_registered_sso(
                     settings, sso, email=alias_email,
-                    user_agent=activation.user_agent if activation else '',
-                    cloudflare_cookies=activation.cloudflare_cookies if activation else '',
+                    user_agent=(
+                        activation.user_agent if activation and activation.user_agent
+                        else upload_context.user_agent if upload_context else ''
+                    ),
+                    cloudflare_cookies=(
+                        activation.cloudflare_cookies if activation and activation.cloudflare_cookies
+                        else upload_context.cloudflare_cookies if upload_context else ''
+                    ),
                 )
                 if upload_result is not None:
                     imported = upload_result.get('import', {})

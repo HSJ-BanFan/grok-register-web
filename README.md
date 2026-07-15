@@ -152,6 +152,12 @@ Round N SUCCESS! Duration: 28.0s
 3. 刷新 grok2api 出口节点 `grok-register-web`  
 4. 不重新注册，不重新 convert Build  
 
+注册 Worker 也会保留同一浏览器/出口上已经建立的 `grok.com` Cloudflare 上下文：
+成功取得 `cf_clearance` 后，后续轮次只清理 SSO 身份 Cookie，不再全量清除 Grok Web
+的 Cookie；即使浏览器因异常重启，也会把同一 User-Agent 和 Cloudflare Cookie 恢复到新页面。
+Cloudflare 仍可能因出口 IP、User-Agent 或 Cookie 过期而要求重新验证，程序不会伪造或跨出口
+复用该上下文。
+
 ## 项目结构
 
 ```
