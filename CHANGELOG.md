@@ -6,15 +6,57 @@
 
 ## [Unreleased]
 
+## [v0.2.0] - 2026-07-15
+
+本次更新集中提升连续注册、Cloudflare 上下文复用、SSO 身份隔离、验证码邮件容错，以及 grok2api 导入转换的可恢复性。
+
+### 新增
+
+- 注册 Worker 会捕获并复用 `grok.com` 的 `cf_clearance`、`__cf_bm` 和浏览器 User-Agent
+- 每轮注册结束后清理完整 Cookie、缓存和 xAI 身份存储，再仅恢复 Grok Cloudflare 上下文，避免旧 SSO 串号
+- 新增持久化 `sso_identities` 指纹账本，并在成功提交事务内执行原子去重
+- 新增 grok2api 交付状态：`pending`、`uploading`、`success`、`failed`
+- 新增后台持久化补传 Worker；服务重启后会继续处理未完成的 Web 导入和 Build 转换
+- 新增 Linux `scripts/run_with_xvfb.sh`，使用虚拟显示器运行普通有头 Chrome
+- 新增注册入口 Cloudflare、代理错误页和普通挑战页分类及诊断文件
+
 ### 修复
 
-- Linux 服务器新增 `scripts/run_with_xvfb.sh`，使用虚拟显示器运行普通有头 Chrome，并强制单 Worker
-- 浏览器启动前验证代理端口是否能从当前进程/容器网络命名空间访问，代理日志自动移除用户名和密码
-- 注册入口新增 Cloudflare 硬拦截、代理错误页和普通挑战页分类
-- 环境拦截会保存 `data/diagnostics/signup-*.json/.png`，立即停止任务并释放 alias，不消耗注册重试次数
-- 注册页未就绪时不再忽略超时并继续误报“未找到邮箱注册入口按钮”
+- 重复 SSO 不再覆盖 grok2api Web 账号名称，也不会被注册器标记为成功
+- 重复 SSO 和其他可恢复重试不再占用 `max_rounds` 的目标完成名额
+- 并发 Worker 同时获得相同 SSO 时，由数据库事务阻止重复提交
+- SSO 去重记录不再因删除注册结果或重置 alias 而丢失
+- 验证码轮询安全下限统一为 10 次，覆盖 Outlook 邮件延迟到达场景
+- grok2api Build 转换出现瞬时失败时自动重试一次
+- grok2api 整体不可用或两次转换均失败时，记录失败原因并交由后台补传
+- 最大 alias 数设置会同步到现有账号，并正确重新计算账号状态
+- 注册流程跨标签页识别 SSO、成功 URL、Existing account 和资料页状态
+- Linux/容器启动前检查代理可达性，日志自动移除代理用户名和密码
+- 环境拦截会保存 `data/diagnostics/signup-*.json/.png`，停止任务并释放 alias，不消耗重试预算
 
-相关问题：[Issue #3](https://github.com/HSJ-BanFan/grok-register-web/issues/3)
+相关问题：
+
+- [Issue #3](https://github.com/HSJ-BanFan/grok-register-web/issues/3)
+- [Issue #4](https://github.com/HSJ-BanFan/grok-register-web/issues/4)
+
+### 验证结果
+
+| 项目 | 结果 |
+|------|------|
+| 自动化测试 | `100 passed` |
+| 连续真实注册 | `5/5` 成功 |
+| 新注册 SSO | 5 个指纹全部唯一 |
+| grok2api Web/Build | 5 组账号全部双向关联并处于 `active` |
+| 硬化后单账号回归 | 注册、Web 导入、Build 转换全部成功 |
+| 持久化补传 | 人为标记失败后真实补传成功，状态恢复为 `success` |
+
+### 相关提交
+
+- `2aff19a` `feat: reuse registration Cloudflare context`
+- `671c5bb` `fix registration SSO dedupe and delayed verification mail`
+- `e20f939` `retry transient Build conversion failures`
+- `649562c` `harden retry accounting identity ledger and delivery recovery`
+- `405a030` `Merge registration hardening and durable recovery`
 
 ## [v0.1.0] - 2026-07-15
 
