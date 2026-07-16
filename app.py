@@ -5,6 +5,11 @@ import logging
 import secrets
 import webbrowser
 import threading
+import mimetypes
+
+# Override any incorrect MIME mappings loaded from the Windows registry.
+mimetypes.add_type('application/javascript', '.js')
+mimetypes.add_type('text/css', '.css')
 
 from flask import Flask, abort, render_template, request
 from flask_socketio import SocketIO
