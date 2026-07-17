@@ -23,6 +23,7 @@ from core.registration.state import (
     VerificationRequestError,
     email_request_slot,
     is_xai_permission_denied,
+    submit_is_in_flight,  # noqa: F401 - public compatibility import
 )
 from core.registration.profile import (
     ProfileSubmitSnapshot,
