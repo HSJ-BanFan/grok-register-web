@@ -18,6 +18,8 @@ sso.txt
 sso.json
 registered_accounts.*
 mail_credentials.txt
+Asset
+.tmp
 
 # Browser / tooling junk
 .ruff_cache/
