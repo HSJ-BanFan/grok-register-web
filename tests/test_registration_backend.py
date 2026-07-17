@@ -1,4 +1,5 @@
 import base64
+from contextlib import nullcontext
 import json
 import threading
 import unittest
@@ -837,6 +838,54 @@ class ProtocolWorkerFailureMappingTest(unittest.TestCase):
         ]
         self.assertEqual(len(completed_payloads), 1)
         self.assertNotIn('sso', completed_payloads[0])
+
+    def test_post_success_init_runs_only_after_success_commit(self):
+        worker, db, state, socketio = self._worker()
+        worker.browser = None
+        worker._pure_http = True
+        worker._params = SignupParameters('0x4site', 'tree', 'action')
+        worker._session = requests.Session()
+        worker._external_provider = Mock()
+        worker._external_provider.yescaptcha_key = 'k'
+        worker._external_provider.available.return_value = True
+        worker._external_provider.solve.return_value = 'turnstile-token'
+        backend = Mock()
+        backend.send_email_code.return_value = None
+        backend.verify_email_code.return_value = None
+        backend.submit_signup.return_value = Mock(status_code=200, text='')
+        backend.extract_sso.return_value = Mock(sso='unique-sso')
+        backend.last_sso_follow = 'cookie'
+        worker._backend = backend
+        worker.email_mgr.get_code_for_alias.return_value = '123456'
+        db.create_registration.return_value = 42
+        db.find_existing_sso.return_value = None
+        db.complete_registration_success.side_effect = DuplicateSSOError('race')
+        db.finish_registration_attempt.return_value = {
+            'retry_count': 1, 'terminal': False, 'lease_lost': False,
+        }
+        alias = {
+            'id': 7, 'account_id': 1, 'alias_email': 'zero@example.com',
+            'main_email': 'zero@example.com', 'client_id': 'cid',
+            'refresh_token': 'rt', 'provider': 'microsoft',
+        }
+        settings = {
+            'max_code_retries': 10,
+            'grok2api_auto_upload': 'false',
+            'password_mode': 'manual',
+            'manual_password': 'TestPass123!',
+            'random_name_enabled': 'false',
+        }
+
+        with patch.object(worker, '_get_password', return_value='TestPass123!'), \
+             patch.object(worker, '_generate_random_name', return_value=('Ann', 'Lee')), \
+             patch.object(worker, '_post_success_init') as post_init, \
+             patch('core.registration.protocol_worker.email_request_slot', return_value=nullcontext()), \
+             patch.object(worker, '_bind_backend'):
+            worker._do_one_round(
+                alias, 1, 2, settings, 'w-zero', 'worker-zero',
+            )
+
+        post_init.assert_not_called()
 
 
 class EngineProtocolBranchTest(unittest.TestCase):

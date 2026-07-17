@@ -850,13 +850,6 @@ class ProtocolRegistrationWorker:
                     f'previous={duplicate.get("email", "unknown")})'
                 )
 
-            # Optional pure-HTTP post-init (TOS / birth). Failures do not fail the round.
-            self._ensure_alias_lease(lease_lost_event)
-            try:
-                self._post_success_init(sso, settings)
-            except Exception as init_exc:
-                logger.warning('[protocol] post-success init failed: %s', init_exc)
-
             duration = time.time() - start_time
             grok2api_enabled = settings.get('grok2api_auto_upload', 'false') == 'true'
             self._ensure_alias_lease(lease_lost_event)
@@ -865,6 +858,13 @@ class ProtocolRegistrationWorker:
                 grok2api_pending=grok2api_enabled,
             )
             success_committed = True
+
+            # Only mutate the external account after lease ownership and SSO
+            # uniqueness have been committed atomically. Init remains non-fatal.
+            try:
+                self._post_success_init(sso, settings)
+            except Exception as init_exc:
+                logger.warning('[protocol] post-success init failed: %s', init_exc)
 
             if grok2api_enabled:
                 self._upload_grok2api(settings, sso, alias_email, reg_id)
