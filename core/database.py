@@ -11,7 +11,12 @@ from core.failure_policy import (
     account_disable_reason,
     classify_failure,
 )
-from core.mail_providers import SUPPORTED_PROVIDERS
+from core.mail_providers import (
+    MICROSOFT_PROVIDER,
+    MailProviderError,
+    SUPPORTED_PROVIDERS,
+    normalize_provider,
+)
 from core.registration.state import DuplicateSSOError
 
 logger = logging.getLogger(__name__)
@@ -479,8 +484,11 @@ class Database:
 
     def create_temporary_account(self, email, provider, credential):
         """Persist one isolated temporary mailbox for the normal alias scheduler."""
-        provider = str(provider or '').strip().lower()
-        if not provider or provider == 'microsoft':
+        try:
+            provider = normalize_provider(provider)
+        except MailProviderError as exc:
+            raise ValueError(str(exc)) from exc
+        if provider == MICROSOFT_PROVIDER:
             raise ValueError('temporary mailbox provider is required')
         if not email or not credential:
             raise ValueError('temporary mailbox address and credential are required')

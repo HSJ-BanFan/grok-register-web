@@ -1,9 +1,12 @@
 import base64
 import json
+import threading
 import unittest
 from unittest.mock import Mock, patch
 
 import requests
+
+from scripts.mock_turnstile_solver import Handler as MockSolverHandler
 
 from core.registration.backend import (
     BrowserRegistrationBackend,
@@ -17,10 +20,14 @@ from core.registration.backend import (
     build_signup_payload,
     expand_set_cookie_chain,
     follow_sso_http,
+    is_trusted_sso_url,
     redact_sensitive_text,
     resolve_protocol_proxy,
 )
-from core.registration.protocol_worker import ProtocolRegistrationWorker
+from core.registration.protocol_worker import (
+    AliasLeaseLostError,
+    ProtocolRegistrationWorker,
+)
 from core.registration.state import (
     DuplicateSSOError,
     ExistingAccountError,
@@ -52,11 +59,16 @@ def _jwt_with_success_url(success_url: str) -> str:
 
 class RegistrationBackendTest(unittest.TestCase):
     def test_backend_defaults_to_browser(self):
-        self.assertEqual(resolve_registration_backend({}), 'browser')
+        with patch('core.runtime.os.environ.get', return_value=None):
+            self.assertEqual(resolve_registration_backend({}), 'browser')
         self.assertIsInstance(build_registration_backend('browser'), BrowserRegistrationBackend)
 
     def test_invalid_backend_falls_back_to_browser(self):
-        self.assertEqual(resolve_registration_backend({'registration_backend': 'bogus'}), 'browser')
+        with patch('core.runtime.os.environ.get', return_value=None):
+            self.assertEqual(
+                resolve_registration_backend({'registration_backend': 'bogus'}),
+                'browser',
+            )
 
     def test_discovers_parameters_and_action_id(self):
         session = Mock()
@@ -95,6 +107,18 @@ class RegistrationBackendTest(unittest.TestCase):
         self.assertEqual(params.action_id, '7f0a91ba5242676db585f47da85cf4b6088e8920ae')
         self.assertIn('sign-up', params.state_tree)
         self.assertIn('(app)', params.state_tree)
+
+    def test_specific_create_action_reference_wins_across_all_sources(self):
+        generic = '7f' + 'a' * 40
+        specific = '7f' + 'b' * 40
+        discovery = SignupParameterDiscovery(Mock())
+
+        action_id = discovery._find_action_id(
+            f'generic token {generic}',
+            f'createServerReference)("{specific}", callServer, void 0)',
+        )
+
+        self.assertEqual(action_id, specific)
 
     def test_extracts_sso_from_session_cookie(self):
         session = Mock()
@@ -203,6 +227,20 @@ class SensitiveTextAndSsoFollowTest(unittest.TestCase):
         self.assertIn('[REDACTED]', redacted)
         self.assertIn('[JWT]', redacted)
 
+    def test_redact_sensitive_text_strips_json_sso(self):
+        redacted = redact_sensitive_text(
+            '{"sso":"super-secret","sso-rw": "second-secret"}',
+        )
+        self.assertNotIn('super-secret', redacted)
+        self.assertNotIn('second-secret', redacted)
+        self.assertEqual(redacted.count('[REDACTED]'), 2)
+
+    def test_trusted_sso_url_rejects_unapproved_targets(self):
+        self.assertTrue(is_trusted_sso_url('https://auth.x.ai/set-cookie?q=x'))
+        self.assertFalse(is_trusted_sso_url('http://auth.x.ai/set-cookie?q=x'))
+        self.assertFalse(is_trusted_sso_url('https://auth.x.ai.evil.test/x'))
+        self.assertFalse(is_trusted_sso_url('https://user@auth.x.ai/x'))
+
     def test_expand_set_cookie_chain_walks_jwt_success_url(self):
         inner = 'https://auth.x.ai/set-cookie?q=inner-token'
         outer = 'https://auth.x.ai/set-cookie?q=' + _jwt_with_success_url(inner)
@@ -212,21 +250,45 @@ class SensitiveTextAndSsoFollowTest(unittest.TestCase):
 
     def test_follow_sso_http_multi_hop_without_browser(self):
         session = requests.Session()
-        terminal = 'https://auth.x.ai/set-cookie?q=terminal'
-        outer = 'https://auth.x.ai/set-cookie?q=' + _jwt_with_success_url(terminal)
+        outer = 'https://auth.x.ai/set-cookie?q=outer'
         calls = []
 
         def fake_get(url, **kwargs):
             calls.append(url)
             if 'terminal' in url or url.endswith('terminal'):
                 session.cookies.set('sso', 'http-hop-sso', domain='.x.ai')
-            return Mock(status_code=200, text='', url=url)
+                return Mock(status_code=200, text='', url=url)
+            return Mock(
+                status_code=200,
+                text='next https://auth.x.ai/set-cookie?q=terminal',
+                url=url,
+            )
 
         session.get = fake_get  # type: ignore[method-assign]
         sso = follow_sso_http(session, outer)
         self.assertEqual(sso, 'http-hop-sso')
         self.assertGreaterEqual(len(calls), 2)
         self.assertTrue(any('terminal' in c for c in calls))
+
+    def test_follow_sso_http_never_requests_untrusted_nested_url(self):
+        session = requests.Session()
+        calls = []
+
+        def fake_get(url, **kwargs):
+            calls.append(url)
+            return Mock(
+                status_code=200,
+                text='next https://evil.test/set-cookie?q=secret',
+                url=url,
+            )
+
+        follow_sso_http(
+            session,
+            'https://auth.x.ai/set-cookie?q=outer',
+            get_func=fake_get,
+        )
+
+        self.assertEqual(calls, ['https://auth.x.ai/set-cookie?q=outer'])
 
     def test_backend_prefers_http_follow_before_browser_navigate(self):
         session = requests.Session()
@@ -266,8 +328,22 @@ class SensitiveTextAndSsoFollowTest(unittest.TestCase):
             for c in session.cookies
             if getattr(c, 'name', '') == 'sso'
         }
-        # At least one of the intended domains should be stamped.
-        self.assertTrue(domains.intersection({'.x.ai', 'x.ai', '.grok.com', 'grok.com', ''}))
+        self.assertTrue(domains.intersection({'.x.ai', 'x.ai'}))
+        self.assertTrue(domains.intersection({'.grok.com', 'grok.com'}))
+
+    def test_submit_signup_leaves_cookie_header_to_session_jar(self):
+        session = requests.Session()
+        session.cookies.set('__cf_bm', 'cf-cookie', domain='accounts.x.ai')
+        session.cookies.set('clearance', 'clearance-cookie', domain='accounts.x.ai')
+        backend = ProtocolRegistrationBackend(
+            session, SignupParameters('site', 'tree', 'action'),
+        )
+        backend._post = Mock(return_value=Mock(status_code=200, text=''))
+
+        backend.submit_signup({'emailValidationCode': '123456'}, 'https://accounts.x.ai/sign-up')
+
+        headers = backend._post.call_args.kwargs['headers']
+        self.assertNotIn('cookie', {key.lower() for key in headers})
 
 
 class ExternalTurnstileProviderTest(unittest.TestCase):
@@ -295,7 +371,24 @@ class ExternalTurnstileProviderTest(unittest.TestCase):
             'turnstile_provider': 'external',
             'allow_browser_fallback': 'true',
         })
-        self.assertEqual(cfg_override['allow_browser_fallback'], 'true')
+        self.assertEqual(cfg_override['allow_browser_fallback'], 'false')
+        cfg_strict_override = resolve_turnstile_settings({
+            'turnstile_provider': 'strict_external',
+            'allow_browser_fallback': 'true',
+        })
+        self.assertEqual(cfg_strict_override['allow_browser_fallback'], 'false')
+
+    def test_mock_solver_redacts_proxy_in_request_log(self):
+        handler = object.__new__(MockSolverHandler)
+        handler.address_string = Mock(return_value='127.0.0.1')
+        with patch('builtins.print') as output:
+            handler.log_message(
+                '%s',
+                'GET /turnstile?sitekey=x&proxy=http://user:pass@proxy.test HTTP/1.1',
+            )
+        logged = output.call_args.args[0]
+        self.assertIn('proxy=[REDACTED]', logged)
+        self.assertNotIn('user:pass', logged)
 
     def test_parse_proxy_for_yescaptcha(self):
         fields = parse_proxy_for_yescaptcha('http://user:pass@127.0.0.1:7897')
@@ -425,6 +518,21 @@ class ProtocolWorkerFailureMappingTest(unittest.TestCase):
         db.skip_existing_account_attempt.assert_called_once()
         state.record_failure.assert_called_once_with('worker-1')
 
+    def test_existing_account_lease_loss_does_not_increment_failure(self):
+        worker, db, state, socketio = self._worker()
+        db.skip_existing_account_attempt.return_value = {
+            'lease_lost': True, 'account_disabled': False,
+        }
+        alias = {'id': 1, 'alias_email': 'a@b.com', 'main_email': 'a@b.com'}
+
+        worker._handle_round_failure(
+            ExistingAccountError('exists'),
+            'exists', 1.0, reg_id=9, alias=alias, lease_owner='w1',
+            max_retries=2, round_num=1, worker_id='worker-1', alias_email='a@b.com',
+        )
+
+        state.record_failure.assert_not_called()
+
     def test_duplicate_sso_uses_extra_retry_budget(self):
         worker, db, state, socketio = self._worker()
         db.finish_registration_attempt.return_value = {
@@ -450,6 +558,75 @@ class ProtocolWorkerFailureMappingTest(unittest.TestCase):
         )
         db.abort_registration_attempt.assert_called_once()
         state.stop.assert_called_once()
+
+    def test_permission_denied_lease_loss_does_not_increment_failure(self):
+        worker, db, state, socketio = self._worker()
+        db.abort_registration_attempt.return_value = False
+        alias = {'id': 1, 'alias_email': 'a@b.com', 'main_email': 'a@b.com'}
+
+        worker._handle_round_failure(
+            VerificationRequestError('permission_denied HTTP 403'),
+            'permission_denied HTTP 403', 1.0, reg_id=9, alias=alias,
+            lease_owner='w1', max_retries=2, round_num=1,
+            worker_id='worker-1', alias_email='a@b.com',
+        )
+
+        state.record_failure.assert_not_called()
+
+    def test_lease_heartbeat_signals_lost_ownership(self):
+        worker, db, state, socketio = self._worker()
+        db.heartbeat_alias_lease.return_value = False
+        db.get_alias_lease_state.return_value = {
+            'status': 'processing', 'lease_owner': 'other-worker',
+        }
+        stop_event = Mock()
+        stop_event.wait.return_value = False
+        lease_lost = threading.Event()
+
+        worker._lease_heartbeat(1, 'w1', 120, stop_event, lease_lost)
+
+        self.assertTrue(lease_lost.is_set())
+
+    def test_lost_lease_aborts_before_registration_side_effects(self):
+        worker, db, state, socketio = self._worker()
+        lease_lost = threading.Event()
+        lease_lost.set()
+        alias = {
+            'id': 1, 'account_id': 1, 'alias_email': 'a@b.com',
+            'main_email': 'a@b.com', 'client_id': 'c', 'refresh_token': 'r',
+        }
+
+        with self.assertRaises(AliasLeaseLostError):
+            worker._do_one_round(
+                alias, 1, 2, {}, 'w1', 'worker-1', lease_lost,
+            )
+
+        db.create_registration.assert_not_called()
+
+    @patch('core.registration.protocol_worker.upload_registered_sso')
+    def test_protocol_grok2api_upload_records_success(self, upload):
+        worker, db, state, socketio = self._worker()
+        upload.return_value = {
+            'import': {'created': 1},
+            'conversion': {'created': 1},
+        }
+
+        worker._upload_grok2api({}, 'sso-token', 'a@b.com', 9)
+
+        db.begin_grok2api_upload.assert_called_once_with(9)
+        db.finish_grok2api_upload.assert_called_once_with(9, True)
+
+    @patch('core.registration.protocol_worker.upload_registered_sso')
+    def test_protocol_grok2api_upload_records_failure(self, upload):
+        worker, db, state, socketio = self._worker()
+        upload.side_effect = RuntimeError('upload failed')
+
+        worker._upload_grok2api({}, 'sso-token', 'a@b.com', 9)
+
+        db.begin_grok2api_upload.assert_called_once_with(9)
+        finish_args = db.finish_grok2api_upload.call_args.args
+        self.assertEqual(finish_args[:2], (9, False))
+        self.assertIsInstance(finish_args[2], RuntimeError)
 
     def test_prepare_transport_pure_http_without_browser(self):
         worker, db, state, socketio = self._worker()
@@ -653,6 +830,13 @@ class ProtocolWorkerFailureMappingTest(unittest.TestCase):
         self.assertEqual(post_init.call_args.args[1].get('protocol_post_init'), 'false')
         summary = worker._mode_summary()
         self.assertEqual(summary, 'transport=http turnstile=yescaptcha sso_follow=http')
+        completed_payloads = [
+            call.args[1]
+            for call in socketio.emit.call_args_list
+            if call.args and call.args[0] == 'round_complete'
+        ]
+        self.assertEqual(len(completed_payloads), 1)
+        self.assertNotIn('sso', completed_payloads[0])
 
 
 class EngineProtocolBranchTest(unittest.TestCase):

@@ -66,6 +66,7 @@ class RegistrationState:
         self._success = 0
         self._failed = 0
         self._active_workers = {}
+        self._provisional_workers = set()
 
     @property
     def status(self):
@@ -152,8 +153,16 @@ class RegistrationState:
         target slot, while concurrent workers cannot reserve beyond max_rounds.
         """
         with self._lock:
-            if max_rounds > 0 and self._completed + len(self._active_workers) >= max_rounds:
+            has_provisional_slot = worker_id in self._provisional_workers
+            if (
+                not has_provisional_slot
+                and max_rounds > 0
+                and self._completed
+                + len(self._active_workers)
+                + len(self._provisional_workers) >= max_rounds
+            ):
                 return None
+            self._provisional_workers.discard(worker_id)
             self._current_round += 1
             self._active_workers[worker_id] = {
                 'worker_id': worker_id,
@@ -165,12 +174,34 @@ class RegistrationState:
             self._legacy_current_email = ''
             return self._current_round
 
+    def reserve_worker_capacity(self, worker_id, max_rounds=0):
+        """Atomically reserve capacity before an alias may be provisioned."""
+        with self._lock:
+            if worker_id in self._active_workers or worker_id in self._provisional_workers:
+                return True
+            if (
+                max_rounds > 0
+                and self._completed
+                + len(self._active_workers)
+                + len(self._provisional_workers) >= max_rounds
+            ):
+                return False
+            self._provisional_workers.add(worker_id)
+            return True
+
+    def release_worker_capacity(self, worker_id):
+        """Release an unused provisional slot after alias acquisition fails."""
+        with self._lock:
+            self._provisional_workers.discard(worker_id)
+
     def has_worker_round_capacity(self, max_rounds=0):
         """Check target capacity before a worker provisions or claims an alias."""
         with self._lock:
             return not (
                 max_rounds > 0
-                and self._completed + len(self._active_workers) >= max_rounds
+                and self._completed
+                + len(self._active_workers)
+                + len(self._provisional_workers) >= max_rounds
             )
 
     def set_worker_active(self, worker_id, round_number, alias):
@@ -187,6 +218,7 @@ class RegistrationState:
     def clear_worker(self, worker_id):
         with self._lock:
             self._active_workers.pop(worker_id, None)
+            self._provisional_workers.discard(worker_id)
 
     def record_success(self, worker_id=None):
         with self._lock:
@@ -194,6 +226,7 @@ class RegistrationState:
             self._completed += 1
             if worker_id:
                 self._active_workers.pop(worker_id, None)
+                self._provisional_workers.discard(worker_id)
 
     def record_failure(self, worker_id=None):
         with self._lock:
@@ -201,6 +234,7 @@ class RegistrationState:
             self._completed += 1
             if worker_id:
                 self._active_workers.pop(worker_id, None)
+                self._provisional_workers.discard(worker_id)
 
     def pause(self):
         self._pause_event.clear()

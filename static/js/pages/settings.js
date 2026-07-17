@@ -138,27 +138,27 @@ export async function render(container) {
                 <div class="form-row">
                     <div class="form-group">
                         <label>每账号最大别名数</label>
-                        <input type="number" class="form-input" id="s-max-aliases" value="${s.max_aliases_per_account || 5}" min="1">
+                        <input type="number" class="form-input" id="s-max-aliases" value="${escapeAttr(s.max_aliases_per_account || 5)}" min="1">
                     </div>
                     <div class="form-group">
                         <label>验证码轮询次数</label>
-                        <input type="number" class="form-input" id="s-code-retries" value="${s.max_code_retries || 3}" min="1">
+                        <input type="number" class="form-input" id="s-code-retries" value="${escapeAttr(s.max_code_retries || 3)}" min="1">
                     </div>
                 </div>
                 <div class="form-row">
                     <div class="form-group">
                         <label>注册超时限制 (秒)</label>
-                        <input type="number" class="form-input" id="s-timeout" value="${s.registration_timeout || 300}" min="30">
+                        <input type="number" class="form-input" id="s-timeout" value="${escapeAttr(s.registration_timeout || 300)}" min="30">
                     </div>
                     <div class="form-group">
                         <label>确认邮箱重试次数</label>
-                        <input type="number" class="form-input" id="s-confirm-retries" value="${s.max_confirm_retries || 3}" min="1">
+                        <input type="number" class="form-input" id="s-confirm-retries" value="${escapeAttr(s.max_confirm_retries || 3)}" min="1">
                     </div>
                 </div>
                 <div class="form-row">
                     <div class="form-group">
                         <label>每别名最大重试次数</label>
-                        <input type="number" class="form-input" id="s-alias-retries" value="${s.max_retries_per_alias || 3}" min="1">
+                        <input type="number" class="form-input" id="s-alias-retries" value="${escapeAttr(s.max_retries_per_alias || 3)}" min="1">
                     </div>
                     <div class="form-group">
                         <label>并发注册 Worker 数（稳定模式固定为 1）</label>
@@ -198,7 +198,7 @@ export async function render(container) {
                 <div class="form-row">
                     <div class="form-group">
                         <label>浏览器代理 (降低 Cloudflare 验证概率)</label>
-                        <input type="text" class="form-input" id="s-browser-proxy" value="${s.browser_proxy || ''}" placeholder="http://127.0.0.1:7897 （留空=直连）">
+                        <input type="text" class="form-input" id="s-browser-proxy" value="${escapeAttr(s.browser_proxy || '')}" placeholder="http://127.0.0.1:7897 （留空=直连）">
                     </div>
                     <div class="form-group">
                         <label>协议 Turnstile 提供方</label>
@@ -255,7 +255,7 @@ export async function render(container) {
                 <div class="form-row" id="manual-password-group" style="${s.password_mode === 'manual' ? '' : 'display:none'}">
                     <div class="form-group">
                         <label>自定义统一密码</label>
-                        <input type="text" class="form-input" id="s-manual-password" value="${s.manual_password || ''}" placeholder="请输入别名账号统一登录密码">
+                        <input type="text" class="form-input" id="s-manual-password" value="${escapeAttr(s.manual_password || '')}" placeholder="请输入别名账号统一登录密码">
                     </div>
                     <div class="form-group" style="visibility: hidden;"></div>
                 </div>
@@ -286,18 +286,18 @@ export async function render(container) {
                 <div class="form-row">
                     <div class="form-group">
                         <label>grok2api 地址</label>
-                        <input type="text" class="form-input" id="s-grok2api-url" value="${s.grok2api_url || 'http://127.0.0.1:21434'}" placeholder="http://127.0.0.1:21434">
+                        <input type="text" class="form-input" id="s-grok2api-url" value="${escapeAttr(s.grok2api_url || 'http://127.0.0.1:21434')}" placeholder="http://127.0.0.1:21434">
                     </div>
                     <div class="form-group" style="visibility: hidden;"></div>
                 </div>
                 <div class="form-row">
                     <div class="form-group">
                         <label>grok2api 管理员用户名</label>
-                        <input type="text" class="form-input" id="s-grok2api-username" value="${s.grok2api_username || 'admin'}">
+                        <input type="text" class="form-input" id="s-grok2api-username" value="${escapeAttr(s.grok2api_username || 'admin')}">
                     </div>
                     <div class="form-group">
                         <label>grok2api 管理员密码</label>
-                        <input type="password" class="form-input" id="s-grok2api-password" value="${s.grok2api_password || ''}" autocomplete="new-password">
+                        <input type="password" class="form-input" id="s-grok2api-password" value="${escapeAttr(s.grok2api_password || '')}" autocomplete="new-password">
                     </div>
                 </div>
 
@@ -314,7 +314,7 @@ export async function render(container) {
                     </div>
                     <div class="form-group">
                         <label>数据导出目录</label>
-                        <input type="text" class="form-input" id="s-export-dir" value="${s.export_dir || './data'}">
+                        <input type="text" class="form-input" id="s-export-dir" value="${escapeAttr(s.export_dir || './data')}">
                     </div>
                 </div>
 

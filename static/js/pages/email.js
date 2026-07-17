@@ -351,10 +351,10 @@ export async function loadAccounts() {
     accountTable = createTable(tableContainer, {
         columns: [
             { title: '#', key: 'id', width: '50px', render: (r, i) => `${i + 1}` },
-            { title: '邮箱账号', key: 'email', render: (r) => `<span style="font-weight:500;">${r.email}</span>` },
+            { title: '邮箱账号', key: 'email', render: (r) => `<span style="font-weight:500;">${escapeHtml(r.email)}</span>` },
             { title: '服务', key: 'provider', width: '105px', render: (r) => {
                 const names = { microsoft: 'Microsoft', duckmail: 'DuckMail', yyds: 'YYDS', cloudflare: 'Cloudflare', cloud_mail: 'Cloud Mail' };
-                return `<span style="font-size:12.5px;">${names[r.provider] || r.provider || 'Microsoft'}</span>`;
+                return `<span style="font-size:12.5px;">${names[r.provider] || (r.provider ? escapeHtml(r.provider) : 'Microsoft')}</span>`;
             }},
             { title: '状态', key: 'status', width: '110px', render: (r) => {
                 const map = { ready: ['badge-ready', '可用别名'], done: ['badge-done', '已用完'], disabled: ['badge-disabled', '已禁用'] };

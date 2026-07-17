@@ -34,6 +34,7 @@ from .backend import (
     build_signup_payload,
     expand_set_cookie_chain,
     follow_sso_http,
+    is_trusted_sso_url,
     redact_sensitive_text,
     resolve_protocol_proxy,
 )
@@ -73,6 +74,7 @@ __all__ = [
     'build_signup_payload',
     'expand_set_cookie_chain',
     'follow_sso_http',
+    'is_trusted_sso_url',
     'redact_sensitive_text',
     'resolve_protocol_proxy',
     'BrowserTurnstileProvider',

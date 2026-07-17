@@ -29,6 +29,22 @@ class TemporaryMailboxProviderInterfaceTest(unittest.TestCase):
             'ABC123',
         )
 
+    def test_extracts_numeric_code_from_non_latin_content(self):
+        self.assertEqual(
+            extract_verification_code(
+                '请使用验证码 739204 完成账号验证。',
+                subject='使用 739204 完成验证',
+            ),
+            '739204',
+        )
+
+    def test_generic_alphanumeric_fallback_requires_a_digit(self):
+        self.assertEqual(
+            extract_verification_code('Please enter ABC123 to continue'),
+            'ABC123',
+        )
+        self.assertIsNone(extract_verification_code('Please enter safely'))
+
     def test_duckmail_provisions_isolated_mailbox(self):
         http = Mock()
         http.request.side_effect = [
@@ -82,10 +98,64 @@ class TemporaryMailboxProviderInterfaceTest(unittest.TestCase):
 
         self.assertEqual(code, 'ABC123')
 
+    def test_detail_fetch_failure_is_retried_without_marking_message_seen(self):
+        listing = response({'hydra:member': [{
+            'id': 'message-1',
+            'to': [{'address': 'new@duck.test'}],
+            'subject': 'xAI verification',
+        }]})
+        failed_detail = response({})
+        failed_detail.raise_for_status.side_effect = RuntimeError('temporary')
+        successful_detail = response({
+            'id': 'message-1',
+            'subject': 'ABC-123 xAI verification',
+            'text': 'Use ABC-123 as your confirmation code',
+        })
+        http = Mock()
+        http.request.side_effect = [
+            listing, failed_detail, listing, successful_detail,
+        ]
+        providers = TemporaryMailboxProviders(http=http, sleep=lambda _: None)
+
+        code = providers.get_verification_code(
+            'duckmail',
+            'new@duck.test',
+            'mailbox-token',
+            {'duckmail_api_base': 'https://duck.example'},
+            max_retries=2,
+        )
+
+        self.assertEqual(code, 'ABC123')
+        self.assertEqual(http.request.call_count, 4)
+
     def test_rejects_unknown_provider(self):
         providers = TemporaryMailboxProviders(http=Mock(), sleep=lambda _: None)
         with self.assertRaisesRegex(MailProviderError, 'Unsupported'):
             providers.provision('unknown', {})
+
+    def test_cloud_mail_requires_each_admin_credential_without_api_key(self):
+        providers = TemporaryMailboxProviders(http=Mock(), sleep=lambda _: None)
+        with self.assertRaisesRegex(MailProviderError, 'cloud_mail_admin_email'):
+            providers.provision('cloud_mail', {
+                'cloud_mail_api_base': 'https://mail.example',
+                'cloud_mail_admin_password': 'secret',
+            })
+        with self.assertRaisesRegex(MailProviderError, 'cloud_mail_admin_password'):
+            providers.provision('cloud_mail', {
+                'cloud_mail_api_base': 'https://mail.example',
+                'cloud_mail_admin_email': 'admin@example.com',
+            })
+
+    def test_cloudflare_mail_read_requires_api_base(self):
+        providers = TemporaryMailboxProviders(http=Mock(), sleep=lambda _: None)
+        with self.assertRaisesRegex(MailProviderError, 'cloudflare_api_base'):
+            providers.get_verification_code(
+                'cloudflare',
+                'user@example.com',
+                'mailbox-token',
+                {},
+                max_retries=1,
+            )
 
 
 class EmailManagerProviderSeamTest(unittest.TestCase):
@@ -155,6 +225,21 @@ class TemporaryMailboxDatabaseTest(unittest.TestCase):
         self.assertEqual(claimed['alias_email'], 'temp@duck.test')
         self.assertEqual(claimed['provider'], 'duckmail')
         self.assertEqual(claimed['account_max_aliases'], 1)
+
+    def test_temporary_account_rejects_unknown_provider(self):
+        with self.assertRaisesRegex(ValueError, 'Unsupported email provider'):
+            self.db.create_temporary_account(
+                'temp@example.com', 'typo-provider', 'mailbox-token',
+            )
+
+    def test_temporary_account_rejects_provider_mismatch(self):
+        self.db.create_temporary_account(
+            'temp@example.com', 'duckmail', 'mailbox-token',
+        )
+        with self.assertRaisesRegex(ValueError, 'already belongs to provider duckmail'):
+            self.db.create_temporary_account(
+                'temp@example.com', 'yyds', 'other-token',
+            )
 
     def test_temporary_account_never_generates_plus_alias(self):
         account_id = self.db.create_temporary_account(

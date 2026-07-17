@@ -44,6 +44,13 @@ PROTOCOL_IMPERSONATE_CANDIDATES = (
     'chrome',
 )
 
+TRUSTED_SSO_HOSTS = frozenset({
+    'accounts.x.ai',
+    'auth.x.ai',
+    'auth.grok.com',
+    'auth.grokipedia.com',
+})
+
 # Full app-router tree used by the working Asset/grok1 pure-HTTP client.
 DEFAULT_SIGNUP_STATE_TREE = (
     '["",{"children":["(app)",{"children":["(auth)",{"children":["sign-up",'
@@ -232,6 +239,12 @@ def redact_sensitive_text(text: str, *, limit: int = 400) -> str:
         flags=re.I,
     )
     redacted = re.sub(
+        r'((?:"|\')?sso(?:-rw)?(?:"|\')?\s*:\s*(?:"|\'))[^"\']+',
+        r'\1[REDACTED]',
+        redacted,
+        flags=re.I,
+    )
+    redacted = re.sub(
         r'((?:^|[;\s])sso(?:-rw)?=)[^;\s"&]+',
         r'\1[REDACTED]',
         redacted,
@@ -243,6 +256,21 @@ def redact_sensitive_text(text: str, *, limit: int = 400) -> str:
         redacted,
     )
     return redacted[: max(0, int(limit or 0)) or 400].replace('\n', ' ')
+
+
+def is_trusted_sso_url(url: str) -> bool:
+    """Allow SSO navigation only to known HTTPS authentication endpoints."""
+    try:
+        parsed = urlparse(str(url or '').strip())
+        return bool(
+            parsed.scheme.lower() == 'https'
+            and (parsed.hostname or '').lower() in TRUSTED_SSO_HOSTS
+            and parsed.username is None
+            and parsed.password is None
+            and parsed.port in (None, 443)
+        )
+    except Exception:
+        return False
 
 
 def expand_set_cookie_chain(url: str) -> list[str]:
@@ -260,7 +288,8 @@ def expand_set_cookie_chain(url: str) -> list[str]:
         return json.loads(raw.decode('utf-8'))
 
     ordered: list[str] = []
-    queue = [str(url or '').strip()]
+    initial = str(url or '').strip()
+    queue = [initial] if is_trusted_sso_url(initial) else []
     seen: set[str] = set()
     while queue:
         current = queue.pop(0)
@@ -291,11 +320,15 @@ def expand_set_cookie_chain(url: str) -> list[str]:
                 cfg = payload if isinstance(payload, dict) else {}
             for key in ('success_url', 'successUrl'):
                 nxt = cfg.get(key)
-                if isinstance(nxt, str) and nxt.startswith('http') and nxt not in seen:
+                if (
+                    isinstance(nxt, str)
+                    and is_trusted_sso_url(nxt)
+                    and nxt not in seen
+                ):
                     queue.append(nxt)
         except Exception:
             continue
-    return ordered or ([str(url).strip()] if url else [])
+    return ordered
 
 
 def read_sso_cookie_from_session(session: requests.Session) -> str:
@@ -348,16 +381,31 @@ def follow_sso_http(
             return get_func(target)
         return session.get(target, allow_redirects=True, timeout=20)
 
-    hops = [h for h in expand_set_cookie_chain(url) if h and 'auth-error' not in h]
+    hops = [
+        h for h in expand_set_cookie_chain(url)
+        if h and 'auth-error' not in h and is_trusted_sso_url(h)
+    ]
     visited: set[str] = set()
-    for hop in hops[: max(1, int(max_hops or 8))]:
+    hop_limit = max(1, int(max_hops or 8))
+    index = 0
+    processed = 0
+    while index < len(hops) and processed < hop_limit:
+        hop = hops[index]
+        index += 1
         if hop in visited:
             continue
+        if not is_trusted_sso_url(hop):
+            continue
         visited.add(hop)
+        processed += 1
         try:
             response = _get(hop)
         except Exception as exc:
-            logger.info('[protocol] http sso hop failed: %s (%s)', hop[:100], type(exc).__name__)
+            logger.info(
+                '[protocol] http sso hop failed: %s (%s)',
+                redact_sensitive_text(hop, limit=100),
+                type(exc).__name__,
+            )
             continue
         sso = read_sso_cookie_from_session(session)
         if sso:
@@ -377,10 +425,19 @@ def follow_sso_http(
         )
         for raw in nested:
             cleaned = re.sub(r'1:$', '', raw).rstrip('",;)}]')
-            if cleaned and cleaned not in visited:
+            if (
+                cleaned
+                and is_trusted_sso_url(cleaned)
+                and cleaned not in visited
+            ):
                 hops.append(cleaned)
                 for extra in expand_set_cookie_chain(cleaned):
-                    if extra and extra not in visited and 'auth-error' not in extra:
+                    if (
+                        extra
+                        and is_trusted_sso_url(extra)
+                        and extra not in visited
+                        and 'auth-error' not in extra
+                    ):
                         hops.append(extra)
     return read_sso_cookie_from_session(session)
 
@@ -593,7 +650,13 @@ class SignupParameterDiscovery:
         for blob in blobs:
             if not blob:
                 continue
-            match = self._ACTION_CREATE_REF.search(blob) or self._ACTION_ID.search(blob)
+            match = self._ACTION_CREATE_REF.search(blob)
+            if match:
+                return match.group(1) if match.lastindex else match.group(0)
+        for blob in blobs:
+            if not blob:
+                continue
+            match = self._ACTION_ID.search(blob)
             if match:
                 return match.group(1) if match.lastindex else match.group(0)
         return ''
@@ -706,13 +769,6 @@ class ProtocolRegistrationBackend:
         headers.pop('x-user-agent', None)
         # Asset/grok1 posts JSON list body; keep separators tight like the browser.
         body = json.dumps([body_obj], separators=(",", ":"))
-        # Prefer explicit __cf_bm cookie header like grok1 when using pure HTTP.
-        try:
-            cf_bm = self.session.cookies.get('__cf_bm') or ''
-        except Exception:
-            cf_bm = ''
-        if cf_bm and 'cookie' not in {k.lower() for k in headers}:
-            headers['cookie'] = f'__cf_bm={cf_bm}'
         response = self._post(signup_url, data=body, headers=headers, timeout=30)
         self._raise_for_protocol(response, action='submit_signup')
         self._raise_for_action_error(response, action='submit_signup')
@@ -767,7 +823,7 @@ class ProtocolRegistrationBackend:
         candidates = []
         for url in set_cookie_urls + auth_urls:
             cleaned = url.rstrip('",;)}]')
-            if cleaned not in candidates:
+            if is_trusted_sso_url(cleaned) and cleaned not in candidates:
                 candidates.append(cleaned)
         candidates.sort(key=_rank)
 
@@ -795,6 +851,9 @@ class ProtocolRegistrationBackend:
         session.get can still walk JWT success_url hops. Browser navigation is
         only used when hybrid transport has already started Chrome.
         """
+        if not is_trusted_sso_url(url):
+            logger.warning('[protocol] rejected untrusted SSO URL')
+            return ''
         # Always try pure HTTP multi-hop first so zero-browser mode is honest.
         try:
             sso = follow_sso_http(

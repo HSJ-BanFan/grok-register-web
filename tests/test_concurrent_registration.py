@@ -1,6 +1,7 @@
 import os
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -293,6 +294,33 @@ class ConcurrentAliasClaimTest(unittest.TestCase):
 
 
 class RegistrationStateConcurrencyTest(unittest.TestCase):
+    def test_provisional_capacity_is_reserved_atomically(self):
+        state = RegistrationState()
+        barrier = threading.Barrier(9)
+        results = []
+        result_lock = threading.Lock()
+
+        def reserve(index):
+            barrier.wait()
+            reserved = state.reserve_worker_capacity(
+                f'worker-{index}', max_rounds=1,
+            )
+            with result_lock:
+                results.append(reserved)
+
+        threads = [
+            threading.Thread(target=reserve, args=(index,))
+            for index in range(8)
+        ]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join(timeout=5)
+
+        self.assertEqual(results.count(True), 1)
+        self.assertEqual(results.count(False), 7)
+
     def test_retry_does_not_consume_max_round_target(self):
         state = RegistrationState()
         alias = {
@@ -345,6 +373,53 @@ class RegistrationStateConcurrencyTest(unittest.TestCase):
 
 
 class RegistrationCoordinatorTest(unittest.TestCase):
+    def test_max_rounds_one_provisions_only_one_temporary_mailbox(self):
+        db = Mock()
+        db.get_settings.return_value = {
+            'browser_headless': 'true',
+            'browser_proxy': '',
+            'registration_timeout': '300',
+            'email_provider': 'cloud_mail',
+        }
+        email_mgr = Mock()
+        claim_count = 0
+        claim_lock = threading.Lock()
+
+        def claim_alias(*_args, **_kwargs):
+            nonlocal claim_count
+            with claim_lock:
+                claim_count += 1
+            time.sleep(0.05)
+            return {
+                'id': 1,
+                'account_id': 1,
+                'alias_email': 'temp@example.com',
+            }
+
+        email_mgr.claim_registration_alias.side_effect = claim_alias
+        browser_template = Mock()
+        browsers = [Mock() for _ in range(4)]
+        browser_template.clone.side_effect = browsers
+        state = RegistrationState()
+        engine = RegistrationEngine(
+            db, browser_template, email_mgr, Mock(), state,
+        )
+
+        def complete_round(_engine, _alias, _round, _retries, _settings,
+                           _lease_owner, worker_id):
+            state.record_success(worker_id)
+
+        with patch.object(
+            RegistrationEngine,
+            '_do_one_round',
+            autospec=True,
+            side_effect=complete_round,
+        ):
+            engine.run(max_rounds=1, max_retries=3, concurrency=4)
+
+        self.assertEqual(claim_count, 1)
+        self.assertEqual(state.completed, 1)
+
     def test_each_worker_receives_an_independent_browser_manager(self):
         db = Mock()
         db.get_settings.return_value = {

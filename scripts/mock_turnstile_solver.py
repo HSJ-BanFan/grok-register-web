@@ -11,6 +11,7 @@ path validation. For production use YesCaptcha or a real browser solver.
 from __future__ import annotations
 
 import argparse
+import re
 import threading
 import time
 import uuid
@@ -31,7 +32,13 @@ class Handler(BaseHTTPRequestHandler):
     server: MockTurnstileServer
 
     def log_message(self, fmt, *args):
-        print(f'[mock-solver] {self.address_string()} - {fmt % args}')
+        message = re.sub(
+            r'([?&]proxy=)[^&\s]+',
+            r'\1[REDACTED]',
+            fmt % args,
+            flags=re.IGNORECASE,
+        )
+        print(f'[mock-solver] {self.address_string()} - {message}')
 
     def _json(self, code: int, payload: dict):
         import json

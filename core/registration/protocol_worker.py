@@ -48,6 +48,10 @@ logger = logging.getLogger('register')
 MIN_VERIFICATION_CODE_POLLS = 10
 
 
+class AliasLeaseLostError(RuntimeError):
+    """The worker no longer owns the alias and must stop all side effects."""
+
+
 class ProtocolRegistrationWorker:
     """Account worker that drives ProtocolRegistrationBackend end-to-end.
 
@@ -155,7 +159,7 @@ class ProtocolRegistrationWorker:
                 self.state.check_pause()
                 if self.state.should_stop():
                     break
-                if not self.state.has_worker_round_capacity(max_rounds):
+                if not self.state.reserve_worker_capacity(worker_id, max_rounds):
                     break
                 try:
                     alias = self.email_mgr.claim_registration_alias(
@@ -173,9 +177,11 @@ class ProtocolRegistrationWorker:
                         f'[{worker_id}] Email provider failed: {exc}',
                         fatal=True,
                     )
+                    self.state.release_worker_capacity(worker_id)
                     self.state.stop()
                     break
                 if not alias:
+                    self.state.release_worker_capacity(worker_id)
                     break
                 claimed_any.set()
 
@@ -183,14 +189,19 @@ class ProtocolRegistrationWorker:
                     worker_id, alias, max_rounds,
                 )
                 if round_num is None:
+                    self.state.release_worker_capacity(worker_id)
                     self.db.release_alias_claim(alias['id'], lease_owner)
                     break
 
                 self._emit_status()
                 heartbeat_stop = threading.Event()
+                lease_lost = threading.Event()
                 heartbeat = threading.Thread(
                     target=self._lease_heartbeat,
-                    args=(alias['id'], lease_owner, lease_seconds, heartbeat_stop),
+                    args=(
+                        alias['id'], lease_owner, lease_seconds,
+                        heartbeat_stop, lease_lost,
+                    ),
                     name=f'lease-{worker_id}',
                     daemon=True,
                 )
@@ -199,7 +210,7 @@ class ProtocolRegistrationWorker:
                     try:
                         self._do_one_round(
                             alias, round_num, max_retries, settings,
-                            lease_owner, worker_id,
+                            lease_owner, worker_id, lease_lost,
                         )
                     except Exception as exc:
                         logger.exception(
@@ -619,13 +630,16 @@ class ProtocolRegistrationWorker:
         except Exception as exc:
             logger.warning('[protocol] post-init skipped: %s', type(exc).__name__)
 
-    def _lease_heartbeat(self, alias_id, lease_owner, lease_seconds, stop_event):
+    def _lease_heartbeat(self, alias_id, lease_owner, lease_seconds, stop_event,
+                         lease_lost_event=None):
         interval = max(5, min(60, lease_seconds // 3))
         while not stop_event.wait(interval):
             try:
                 if not self.db.heartbeat_alias_lease(
                     alias_id, lease_owner, lease_seconds,
                 ):
+                    if lease_lost_event is not None:
+                        lease_lost_event.set()
                     alias_state = self.db.get_alias_lease_state(alias_id) or {}
                     if (
                         alias_state.get('status') in ('used', 'failed')
@@ -637,11 +651,17 @@ class ProtocolRegistrationWorker:
             except Exception as exc:
                 logger.warning('[protocol] Alias %s lease heartbeat failed: %s', alias_id, exc)
 
+    @staticmethod
+    def _ensure_alias_lease(lease_lost_event):
+        if lease_lost_event is not None and lease_lost_event.is_set():
+            raise AliasLeaseLostError('alias lease was lost during protocol registration')
+
     def _do_one_round(self, alias, round_num, max_retries, settings,
-                      lease_owner, worker_id):
+                      lease_owner, worker_id, lease_lost_event=None):
         alias_email = alias['alias_email']
         logger.info('[protocol][%s] Round %s: using alias %s', worker_id, round_num, alias_email)
 
+        self._ensure_alias_lease(lease_lost_event)
         password = self._get_password(settings)
         given_name, family_name = self._generate_random_name(settings)
         reg_id = self.db.create_registration(
@@ -656,6 +676,7 @@ class ProtocolRegistrationWorker:
 
         try:
             self.state.check_pause()
+            self._ensure_alias_lease(lease_lost_event)
             # Hybrid path only: recover page disconnects from previous navigations.
             if not self._pure_http:
                 self._ensure_browser_ready(force_reload=False)
@@ -675,6 +696,7 @@ class ProtocolRegistrationWorker:
                     pass
 
             self.state.check_pause()
+            self._ensure_alias_lease(lease_lost_event)
             mode = self._mode_summary()
             logger.info('[protocol] sending verification code for %s (%s)', alias_email, mode)
             verification_requested_at = datetime.now(timezone.utc)
@@ -689,6 +711,7 @@ class ProtocolRegistrationWorker:
                 raise VerificationRequestError(str(exc)) from exc
 
             self.state.check_pause()
+            self._ensure_alias_lease(lease_lost_event)
             logger.info('[protocol] polling mailbox for verification code…')
             code = self.email_mgr.get_code_for_alias(
                 alias_email, alias['account_id'],
@@ -704,6 +727,7 @@ class ProtocolRegistrationWorker:
             )
 
             self.state.check_pause()
+            self._ensure_alias_lease(lease_lost_event)
             logger.info('[protocol] verifying email code')
             try:
                 self._backend.verify_email_code(alias_email, code, SIGNUP_URL)
@@ -718,6 +742,7 @@ class ProtocolRegistrationWorker:
                 raise
 
             self.state.check_pause()
+            self._ensure_alias_lease(lease_lost_event)
             token = self._solve_turnstile(
                 url=SIGNUP_URL,
                 site_key=self._params.site_key,
@@ -732,6 +757,7 @@ class ProtocolRegistrationWorker:
                 and self._provider is not None
                 and self._browser_started
             ):
+                self._ensure_alias_lease(lease_lost_event)
                 try:
                     castle_token = self._provider.create_castle_token() or ''
                 except Exception as exc:
@@ -747,6 +773,7 @@ class ProtocolRegistrationWorker:
                 castle_request_token=castle_token,
             )
             logger.info('[protocol] submitting signup for %s', alias_email)
+            self._ensure_alias_lease(lease_lost_event)
             try:
                 response = self._backend.submit_signup(payload, SIGNUP_URL, token)
             except ExistingAccountActionError as exc:
@@ -763,6 +790,7 @@ class ProtocolRegistrationWorker:
                     ) from exc
                 raise
 
+            self._ensure_alias_lease(lease_lost_event)
             result = self._backend.extract_sso(response)
             sso = (result.sso or '').strip()
             follow_mode = getattr(self._backend, 'last_sso_follow', '') or ''
@@ -782,6 +810,7 @@ class ProtocolRegistrationWorker:
                 if sso:
                     self._sso_follow_mode = 'browser'
             if not sso:
+                self._ensure_alias_lease(lease_lost_event)
                 body = getattr(response, 'text', '') or ''
                 match = re.search(
                     r'https://[^"\s\\]+set-cookie\?q=[^"\s\\]+',
@@ -822,6 +851,7 @@ class ProtocolRegistrationWorker:
                 )
 
             # Optional pure-HTTP post-init (TOS / birth). Failures do not fail the round.
+            self._ensure_alias_lease(lease_lost_event)
             try:
                 self._post_success_init(sso, settings)
             except Exception as init_exc:
@@ -829,6 +859,7 @@ class ProtocolRegistrationWorker:
 
             duration = time.time() - start_time
             grok2api_enabled = settings.get('grok2api_auto_upload', 'false') == 'true'
+            self._ensure_alias_lease(lease_lost_event)
             completion = self.db.complete_registration_success(
                 reg_id, alias['id'], lease_owner, sso, duration=duration,
                 grok2api_pending=grok2api_enabled,
@@ -836,26 +867,7 @@ class ProtocolRegistrationWorker:
             success_committed = True
 
             if grok2api_enabled:
-                self.db.begin_grok2api_upload(reg_id)
-                try:
-                    upload_result = upload_registered_sso(
-                        settings, sso, email=alias_email,
-                        user_agent='',
-                        cloudflare_cookies='',
-                    )
-                    self.db.finish_grok2api_upload(reg_id, True)
-                    if upload_result is not None:
-                        imported = upload_result.get('import', {})
-                        converted = upload_result.get('conversion', {})
-                        logger.info(
-                            '[protocol] grok2api auto pipeline completed: '
-                            'web_created=%s build_created=%s',
-                            imported.get('created', 0),
-                            converted.get('created', 0),
-                        )
-                except Exception as upload_error:
-                    self.db.finish_grok2api_upload(reg_id, False, upload_error)
-                    logger.warning('[protocol] grok2api auto upload failed: %s', upload_error)
+                self._upload_grok2api(settings, sso, alias_email, reg_id)
 
             self.state.record_success(worker_id)
             mode = self._mode_summary()
@@ -867,7 +879,6 @@ class ProtocolRegistrationWorker:
                 'round': round_num,
                 'email': alias_email,
                 'success': True,
-                'sso': sso[:50] + '...' if len(sso) > 50 else sso,
                 'duration': round(duration, 1),
                 'backend': 'protocol',
                 'transport': mode,
@@ -886,6 +897,14 @@ class ProtocolRegistrationWorker:
 
         except Exception as e:
             duration = time.time() - start_time
+            if (
+                lease_lost_event is not None
+                and lease_lost_event.is_set()
+                and not isinstance(e, AliasLeaseLostError)
+            ):
+                e = AliasLeaseLostError(
+                    'alias lease was lost during protocol registration'
+                )
             error_msg = str(e)
             if success_committed:
                 logger.warning(
@@ -898,9 +917,48 @@ class ProtocolRegistrationWorker:
                 max_retries, round_num, worker_id, alias_email,
             )
 
+    def _upload_grok2api(self, settings, sso, alias_email, reg_id):
+        """Run the optional upload pipeline while preserving durable retry state."""
+        self.db.begin_grok2api_upload(reg_id)
+        try:
+            upload_result = upload_registered_sso(
+                settings, sso, email=alias_email,
+                user_agent='',
+                cloudflare_cookies='',
+            )
+            self.db.finish_grok2api_upload(reg_id, True)
+            if upload_result is not None:
+                imported = upload_result.get('import', {})
+                converted = upload_result.get('conversion', {})
+                logger.info(
+                    '[protocol] grok2api auto pipeline completed: '
+                    'web_created=%s build_created=%s',
+                    imported.get('created', 0),
+                    converted.get('created', 0),
+                )
+        except Exception as upload_error:
+            self.db.finish_grok2api_upload(reg_id, False, upload_error)
+            logger.warning('[protocol] grok2api auto upload failed: %s', upload_error)
+
     def _handle_round_failure(self, exc, error_msg, duration, reg_id, alias,
                               lease_owner, max_retries, round_num, worker_id,
                               alias_email):
+        if isinstance(exc, AliasLeaseLostError):
+            logger.warning(
+                '[protocol] Round %s stopped because alias %s lease was lost',
+                round_num, alias_email,
+            )
+            self.socketio.emit('round_complete', {
+                'round': round_num,
+                'email': alias_email,
+                'success': False,
+                'reason': 'lease_lost',
+                'duration': round(duration, 1),
+                'backend': 'protocol',
+            })
+            self._emit_status()
+            return
+
         if isinstance(exc, ProtocolEnvironmentError):
             released = self.db.abort_registration_attempt(
                 reg_id=reg_id,
@@ -942,11 +1000,18 @@ class ProtocolRegistrationWorker:
                 error=error_msg,
                 duration=duration,
             )
-            self.state.record_failure(worker_id)
-            logger.warning(
-                '[protocol] Existing account skipped without retry: %s (lease_lost=%s)',
-                alias_email, outcome.get('lease_lost'),
-            )
+            if not outcome.get('lease_lost'):
+                self.state.record_failure(worker_id)
+            if outcome.get('lease_lost'):
+                logger.warning(
+                    '[protocol] Existing account %s was not skipped because its lease was lost',
+                    alias_email,
+                )
+            else:
+                logger.warning(
+                    '[protocol] Existing account skipped without retry: %s',
+                    alias_email,
+                )
             self.socketio.emit('round_complete', {
                 'round': round_num,
                 'email': alias_email,
@@ -986,7 +1051,8 @@ class ProtocolRegistrationWorker:
                 error=error_msg,
                 duration=duration,
             )
-            self.state.record_failure(worker_id)
+            if released:
+                self.state.record_failure(worker_id)
             self.state.stop()
             logger.error(
                 '[protocol] Round %s stopped by xAI permission_denied 403; alias %s was %s',

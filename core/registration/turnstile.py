@@ -40,8 +40,10 @@ def resolve_turnstile_settings(settings=None) -> dict[str, str]:
         str(settings.get('allow_browser_fallback', '') or '').strip().lower()
         or str(os.environ.get('GROK_REGISTER_ALLOW_BROWSER_FALLBACK', '') or '').strip().lower()
     )
-    # external / strict_external / yescaptcha / solver: no Chrome fallback by default.
-    if allow_fallback_raw in {'0', 'false', 'no', 'off'}:
+    # Explicit external modes are fail-closed and never start Chrome.
+    if mode in {'external', 'strict_external', 'strict'}:
+        allow_browser_fallback = 'false'
+    elif allow_fallback_raw in {'0', 'false', 'no', 'off'}:
         allow_browser_fallback = 'false'
     elif allow_fallback_raw in {'1', 'true', 'yes', 'on'}:
         allow_browser_fallback = 'true'
@@ -578,13 +580,24 @@ return (async () => {
 
     def navigate_for_sso(self, url: str, *, timeout: int = 20) -> str:
         """Navigate the browser through nested set-cookie hops and return SSO."""
+        from core.registration.backend import (
+            is_trusted_sso_url,
+            redact_sensitive_text,
+        )
+
+        if not is_trusted_sso_url(url):
+            logger.warning('[protocol] rejected untrusted browser SSO URL')
+            return ''
         self.ensure_started()
         hops = self._expand_set_cookie_chain(url)
         # Skip terminal error pages in the chain.
-        hops = [h for h in hops if 'auth-error' not in h]
+        hops = [
+            h for h in hops
+            if 'auth-error' not in h and is_trusted_sso_url(h)
+        ]
         logger.info(
             '[protocol] navigating for SSO hops=%s first=%s',
-            len(hops), (hops[0] if hops else '')[:120],
+            len(hops), redact_sensitive_text(hops[0] if hops else '', limit=120),
         )
         before = {
             str(item.get('name')): str(item.get('value') or '')
@@ -593,10 +606,16 @@ return (async () => {
         }
         sso = ''
         for hop in hops:
+            if not is_trusted_sso_url(hop):
+                continue
             try:
                 self.browser.get(hop)
             except Exception as exc:
-                logger.warning('[protocol] SSO hop failed: %s (%s)', hop[:100], exc)
+                logger.warning(
+                    '[protocol] SSO hop failed: %s (%s)',
+                    redact_sensitive_text(hop, limit=100),
+                    type(exc).__name__,
+                )
                 continue
             hop_deadline = time.time() + max(4, min(12, int(timeout or 20) // max(1, len(hops))))
             while time.time() < hop_deadline:

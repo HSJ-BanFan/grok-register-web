@@ -1,7 +1,6 @@
 import logging
 import threading
 import time
-import string
 import random
 import secrets
 import re
@@ -15,18 +14,15 @@ from core.account_activation import (
     CloudflareContext,
     activate_grok_web,
     capture_cloudflare_context,
-    clear_sso_cookies,
     restore_cloudflare_context,
 )
 from core.registration.state import (
-    EMAIL_REQUEST_MIN_INTERVAL,
     DuplicateSSOError,
     ExistingAccountError,
-    RegistrationState,
+    RegistrationState,  # noqa: F401 - public compatibility import
     VerificationRequestError,
     email_request_slot,
     is_xai_permission_denied,
-    submit_is_in_flight,
 )
 from core.registration.profile import (
     ProfileSubmitSnapshot,
@@ -156,7 +152,7 @@ class RegistrationEngine:
                 self.state.check_pause()
                 if self.state.should_stop():
                     break
-                if not self.state.has_worker_round_capacity(max_rounds):
+                if not self.state.reserve_worker_capacity(worker_id, max_rounds):
                     break
                 try:
                     alias = self.email_mgr.claim_registration_alias(
@@ -172,9 +168,11 @@ class RegistrationEngine:
                         f'[{worker_id}] Email provider failed: {exc}',
                         fatal=True,
                     )
+                    self.state.release_worker_capacity(worker_id)
                     self.state.stop()
                     break
                 if not alias:
+                    self.state.release_worker_capacity(worker_id)
                     break
                 claimed_any.set()
 
@@ -182,6 +180,7 @@ class RegistrationEngine:
                     worker_id, alias, max_rounds,
                 )
                 if round_num is None:
+                    self.state.release_worker_capacity(worker_id)
                     self.db.release_alias_claim(alias['id'], lease_owner)
                     break
 
@@ -569,7 +568,8 @@ class RegistrationEngine:
                     error=error_msg,
                     duration=duration,
                 )
-                self.state.record_failure(worker_id)
+                if not outcome['lease_lost']:
+                    self.state.record_failure(worker_id)
                 if outcome['lease_lost']:
                     logger.warning(
                         'Existing account %s detected, but alias lease was lost before skip commit',
@@ -637,7 +637,8 @@ class RegistrationEngine:
                     error=error_msg,
                     duration=duration,
                 )
-                self.state.record_failure(worker_id)
+                if released:
+                    self.state.record_failure(worker_id)
                 self.state.stop()
                 logger.error(
                     'Round %s stopped by xAI permission_denied 403; alias %s '
@@ -2898,7 +2899,7 @@ return r;
                     if stuck_on_signup_start is None:
                         stuck_on_signup_start = time.time()
                     elif time.time() - stuck_on_signup_start > 20:
-                        raise Exception(f"Stuck on sign-up page with no SSO for 20s — submission likely failed")
+                        raise Exception("Stuck on sign-up page with no SSO for 20s — submission likely failed")
 
             time.sleep(1)
 

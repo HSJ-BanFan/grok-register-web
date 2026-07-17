@@ -61,7 +61,7 @@ def extract_verification_code(text, subject=''):
         r'(?:verification\s*code|your\s*code|confirm(?:ation)?\s*code)[:\s]+(\d{4,8})',
         r'(?:验证码|代码|确认码)[:\s为]+(\d{4,8})',
         r'\b(\d{6})\b',
-        r'\b([A-Z0-9]{6})\b',
+        r'\b((?=[A-Z0-9]{0,5}\d)[A-Z0-9]{6})\b',
     )
     for pattern in patterns:
         match = re.search(pattern, body, re.IGNORECASE | re.DOTALL)
@@ -416,8 +416,14 @@ class TemporaryMailboxProviders:
             return self._cloud_mail_tokens[cache_key]
         email_address = str(settings.get('cloud_mail_admin_email', '') or '').strip()
         password = str(settings.get('cloud_mail_admin_password', '') or '').strip()
-        if not email_address or not password:
-            raise MailProviderError('Cloud Mail API key or admin credentials are required')
+        if not email_address:
+            raise MailProviderError(
+                'Cloud Mail cloud_mail_admin_email is required when API key is empty'
+            )
+        if not password:
+            raise MailProviderError(
+                'Cloud Mail cloud_mail_admin_password is required when API key is empty'
+            )
         data = self._json(
             'POST', f'{base}/api/public/genToken', settings,
             headers={'Content-Type': 'application/json'},
@@ -470,6 +476,8 @@ class TemporaryMailboxProviders:
             return []
         if provider == 'cloudflare':
             base = self._base(settings, 'cloudflare_api_base')
+            if not base:
+                raise MailProviderError('Cloudflare cloudflare_api_base is required')
             path = self._path(settings, 'cloudflare_path_messages', '/api/mails')
             data = self._json(
                 'GET', f'{base}{path}', settings,
@@ -479,6 +487,8 @@ class TemporaryMailboxProviders:
             return self._pick_list(data)
         if provider == 'cloud_mail':
             base = self._base(settings, 'cloud_mail_api_base')
+            if not base:
+                raise MailProviderError('Cloud Mail cloud_mail_api_base is required')
             data = self._json(
                 'POST', f'{base}/api/public/emailList', settings,
                 headers={'Authorization': credential, 'Content-Type': 'application/json'},
@@ -491,12 +501,9 @@ class TemporaryMailboxProviders:
         detail = {}
         message_id = self._message_id(message)
         if message_id and provider in ('duckmail', 'yyds', 'cloudflare'):
-            try:
-                detail = self._fetch_detail(
-                    provider, message_id, credential, settings,
-                )
-            except Exception as exc:
-                logger.debug('%s detail fetch failed for %s: %s', provider, message_id, exc)
+            detail = self._fetch_detail(
+                provider, message_id, credential, settings,
+            )
         subject = str(detail.get('subject') or message.get('subject') or '')
         parts = []
         for source in (message, detail):
