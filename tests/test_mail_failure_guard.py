@@ -104,12 +104,21 @@ class LegacyAliasMigrationTest(unittest.TestCase):
                         row['name']
                         for row in db.conn.execute('PRAGMA table_info(aliases)').fetchall()
                     }
+                    account_columns = {
+                        row['name']
+                        for row in db.conn.execute('PRAGMA table_info(accounts)').fetchall()
+                    }
+                    account = db.conn.execute(
+                        'SELECT provider FROM accounts WHERE id=1'
+                    ).fetchone()
                     row = db.conn.execute(
                         '''SELECT failure_category, completed_at
                            FROM aliases WHERE id=1'''
                     ).fetchone()
                     self.assertIn('failure_category', columns)
                     self.assertIn('completed_at', columns)
+                    self.assertIn('provider', account_columns)
+                    self.assertEqual(account['provider'], 'microsoft')
                     self.assertEqual(row['failure_category'], 'mail_fetch')
                     self.assertEqual(row['completed_at'], '2026-01-02 03:04:05')
                     db.conn.close()
@@ -198,19 +207,19 @@ class AccountDisablePolicyTest(unittest.TestCase):
         self.assertTrue(self._finish_alias('failed', 'Turnstile challenge timed out'))
         self.assertEqual(self.db.get_account(self.account_id)['status'], 'disabled')
 
-    def test_database_initialization_removes_deprecated_email_provider_setting(self):
-        self.db.update_settings({'email_provider': 'mail.tm'})
+    def test_database_initialization_keeps_email_provider_setting(self):
+        self.db.update_settings({'email_provider': 'duckmail'})
 
         self.db.init_database()
 
-        self.assertNotIn('email_provider', self.db.get_settings())
+        self.assertEqual(self.db.get_settings()['email_provider'], 'duckmail')
 
-    def test_reset_settings_removes_deprecated_email_provider_setting(self):
-        self.db.update_settings({'email_provider': 'mail.tm'})
+    def test_reset_settings_restores_microsoft_email_provider(self):
+        self.db.update_settings({'email_provider': 'duckmail'})
 
         self.db.reset_settings()
 
-        self.assertNotIn('email_provider', self.db.get_settings())
+        self.assertEqual(self.db.get_settings()['email_provider'], 'microsoft')
 
     def test_recover_stale_does_not_touch_recent_pending_registration(self):
         alias = self.db.get_next_alias(max_retries=3)

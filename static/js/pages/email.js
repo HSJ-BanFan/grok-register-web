@@ -37,7 +37,7 @@ export async function render(container) {
                 批量导入账号
             </div>
             <p style="font-size:13px;color:var(--text-secondary);margin-bottom:14px;line-height:1.6;">
-                支持直接拖拽文件或点击上传。导入格式: <code>邮箱----密码----ClientID----Token</code> (一行一个)。
+                此处仅导入 Microsoft 邮箱。格式: <code>邮箱----密码----ClientID----Token</code> (一行一个)。临时邮箱服务请在「系统设置」选择，注册时会自动创建并进入账号库。
             </p>
 
             <div class="import-two-column">
@@ -351,7 +351,11 @@ export async function loadAccounts() {
     accountTable = createTable(tableContainer, {
         columns: [
             { title: '#', key: 'id', width: '50px', render: (r, i) => `${i + 1}` },
-            { title: '邮箱账号', key: 'email', render: (r) => `<span style="font-weight:500;">${r.email}</span>` },
+            { title: '邮箱账号', key: 'email', render: (r) => `<span style="font-weight:500;">${escapeHtml(r.email)}</span>` },
+            { title: '服务', key: 'provider', width: '105px', render: (r) => {
+                const names = { microsoft: 'Microsoft', duckmail: 'DuckMail', yyds: 'YYDS', cloudflare: 'Cloudflare', cloud_mail: 'Cloud Mail' };
+                return `<span style="font-size:12.5px;">${names[r.provider] || (r.provider ? escapeHtml(r.provider) : 'Microsoft')}</span>`;
+            }},
             { title: '状态', key: 'status', width: '110px', render: (r) => {
                 const map = { ready: ['badge-ready', '可用别名'], done: ['badge-done', '已用完'], disabled: ['badge-disabled', '已禁用'] };
                 const [cls, text] = map[r.status] || ['', r.status];
@@ -378,7 +382,7 @@ export async function loadAccounts() {
             }},
         ],
         data: res.data,
-        emptyText: '暂无账号，请使用拖拽或复制文本批量导入',
+        emptyText: '暂无账号；可导入 Microsoft 邮箱，或在设置中选择临时邮箱服务后开始注册',
     });
 }
 

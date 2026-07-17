@@ -7,6 +7,13 @@ from datetime import datetime, timedelta, timezone
 import requests
 
 from config import SCOPES, TOKEN_URL
+from core.mail_providers import (
+    MICROSOFT_PROVIDER,
+    MailProviderError,
+    TemporaryMailboxProviders,
+    extract_verification_code,
+    normalize_provider,
+)
 
 
 logger = logging.getLogger('register')
@@ -23,8 +30,44 @@ class EmailPermissionError(EmailError):
 class EmailManager:
     def __init__(self, db):
         self.db = db
+        self.providers = TemporaryMailboxProviders()
         self._seen_message_ids = {'graph': set(), 'outlook': set()}
         self._seen_message_lock = threading.Lock()
+
+    def claim_registration_alias(self, settings, max_retries, lease_owner,
+                                 lease_seconds):
+        """Claim an imported Microsoft alias or provision one temporary mailbox."""
+        try:
+            provider = normalize_provider(
+                (settings or {}).get('email_provider', MICROSOFT_PROVIDER)
+            )
+        except MailProviderError as exc:
+            raise EmailError(str(exc)) from exc
+
+        alias = self.db.claim_next_alias(
+            max_retries=max_retries,
+            lease_owner=lease_owner,
+            lease_seconds=lease_seconds,
+            provider=provider,
+        )
+        if alias or provider == MICROSOFT_PROVIDER:
+            return alias
+
+        try:
+            mailbox = self.providers.provision(provider, settings or {})
+        except MailProviderError as exc:
+            raise EmailError(str(exc)) from exc
+        self.db.create_temporary_account(
+            mailbox.address,
+            mailbox.provider,
+            mailbox.credential,
+        )
+        return self.db.claim_next_alias(
+            max_retries=max_retries,
+            lease_owner=lease_owner,
+            lease_seconds=lease_seconds,
+            provider=provider,
+        )
 
     def _get_seen_message_ids(self, mail_api):
         with self._seen_message_lock:
@@ -570,38 +613,34 @@ class EmailManager:
 
     def _extract_code_from_email(self, body):
         """Extract the xAI verification code from a message body."""
-        match = re.search(
-            r'\b([A-Z0-9]{3}-[A-Z0-9]{3})\b.*confirmation\s*code',
-            body or '',
-            re.IGNORECASE,
-        )
-        if match:
-            return match.group(1).upper().replace('-', '')
-
-        patterns = [
-            r'code\s+below\s+to\s+validate.*?\n\s*([A-Z0-9]{3}-[A-Z0-9]{3})\s*\n',
-            r'\b([A-Z0-9]{3}-[A-Z0-9]{3})\b',
-            r'(?:verification\s*code|code\s+)[:\s]+(\d{6})',
-            r'(?:验证码|代码|确认码)[:\s为]+(\d{6})',
-            r'(?:code|验证码)[:\s]+(\d{6})',
-            r'\b(\d{6})\b',
-            r'\b([A-Z0-9]{6})\b',
-        ]
-        for pattern in patterns:
-            match = re.search(pattern, body or '', re.IGNORECASE | re.DOTALL)
-            if match:
-                code = match.group(1)
-                return code.upper().replace('-', '') if '-' in code else code.upper()
-        return None
+        return extract_verification_code(body)
 
     def get_code_for_alias(self, alias_email, account_id, client_id,
                            refresh_token, max_retries=3, main_email=None,
-                           requested_after=None):
+                           requested_after=None, provider=MICROSOFT_PROVIDER,
+                           settings=None):
         """Fetch the code for the mailbox address already submitted to xAI.
 
         After the signup form has been filled with ``alias_email``, switching
         to another provider cannot receive the code and only burns rate limits.
         """
+        try:
+            provider = normalize_provider(provider)
+        except MailProviderError as exc:
+            raise EmailError(str(exc)) from exc
+        if provider != MICROSOFT_PROVIDER:
+            try:
+                return self.providers.get_verification_code(
+                    provider,
+                    alias_email,
+                    refresh_token,
+                    settings or {},
+                    max_retries=max_retries,
+                    requested_after=requested_after,
+                )
+            except MailProviderError as exc:
+                raise EmailError(str(exc)) from exc
+
         return self.get_verification_code(
             alias_email,
             client_id,

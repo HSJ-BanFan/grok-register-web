@@ -11,11 +11,35 @@ from core.failure_policy import (
     account_disable_reason,
     classify_failure,
 )
+from core.mail_providers import (
+    MICROSOFT_PROVIDER,
+    MailProviderError,
+    SUPPORTED_PROVIDERS,
+    normalize_provider,
+)
 from core.registration.state import DuplicateSSOError
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS = {
+    'email_provider': 'microsoft',
+    'duckmail_api_base': 'https://api.duckmail.sbs',
+    'duckmail_api_key': '',
+    'yyds_api_base': 'https://maliapi.215.im/v1',
+    'yyds_api_key': '',
+    'yyds_jwt': '',
+    'cloudflare_api_base': '',
+    'cloudflare_api_key': '',
+    'cloudflare_auth_mode': 'none',
+    'cloudflare_path_domains': '/api/domains',
+    'cloudflare_path_accounts': '/api/new_address',
+    'cloudflare_path_token': '/api/token',
+    'cloudflare_path_messages': '/api/mails',
+    'cloudflare_default_domains': '',
+    'cloud_mail_api_base': 'https://mail.meilunaria.dpdns.org',
+    'cloud_mail_api_key': '',
+    'cloud_mail_admin_email': '',
+    'cloud_mail_admin_password': '',
     'max_aliases_per_account': '5',
     'max_code_retries': '10',
     'max_confirm_retries': '3',
@@ -23,6 +47,9 @@ DEFAULT_SETTINGS = {
     'registration_timeout': '300',
     'registration_concurrency': '1',
     'browser_headless': 'false',
+    # Keep the existing browser flow as the safe default.  ``protocol`` and
+    # ``auto`` are opt-in deployment modes for the protocol backend.
+    'registration_backend': 'browser',
     'turnstile_auto': 'true',
     'random_name_enabled': 'true',
     'extract_numbers_enabled': 'false',
@@ -41,9 +68,20 @@ DEFAULT_SETTINGS = {
     # Browser network proxy, e.g. http://127.0.0.1:7897
     # Aligns with repos/automation/tooling/grok-register which avoids most CF challenges via proxy.
     'browser_proxy': '',
+    # Protocol Turnstile: auto | external | strict_external | browser | yescaptcha | solver
+    # auto prefers YesCaptcha / local solver when available, else browser widget.
+    # external / strict_external: no Chrome fallback (server zero-browser mode).
+    'turnstile_provider': 'auto',
+    'yescaptcha_key': '',
+    'turnstile_solver_url': 'http://127.0.0.1:5072',
+    # When false, protocol worker never starts Chrome (discovery/Turnstile/SSO).
+    # external/strict modes default this to false even if the key is left empty.
+    'allow_browser_fallback': 'true',
+    # After pure-HTTP signup, optionally accept TOS + set birth date via API.
+    'protocol_post_init': 'true',
 }
 
-DEPRECATED_SETTING_KEYS = ('email_provider',)
+DEPRECATED_SETTING_KEYS = ()
 MAX_ALIASES_SETTING_KEY = 'max_aliases_per_account'
 MAX_CODE_RETRIES_SETTING_KEY = 'max_code_retries'
 MIN_CODE_RETRIES = 10
@@ -83,6 +121,7 @@ class Database:
                     password TEXT DEFAULT '',
                     client_id TEXT NOT NULL,
                     refresh_token TEXT NOT NULL,
+                    provider TEXT NOT NULL DEFAULT 'microsoft',
                     status TEXT DEFAULT 'ready',
                     max_aliases INTEGER DEFAULT 5,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -148,6 +187,7 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_registrations_created
                     ON registrations(created_at);
             ''')
+            self._migrate_account_provider(cur)
             self._migrate_alias_terminal_metadata(cur)
             self._migrate_registration_delivery_metadata(cur)
             self._backfill_sso_identities(cur)
@@ -158,6 +198,10 @@ class Database:
             cur.execute(
                 '''CREATE INDEX IF NOT EXISTS idx_aliases_lease_expiry
                    ON aliases(status, lease_expires_at)'''
+            )
+            cur.execute(
+                '''CREATE INDEX IF NOT EXISTS idx_accounts_provider_status
+                   ON accounts(provider, status)'''
             )
             for key, value in DEFAULT_SETTINGS.items():
                 if key == MAX_CODE_RETRIES_SETTING_KEY:
@@ -185,9 +229,24 @@ class Database:
 
     @staticmethod
     def _remove_deprecated_settings(cursor):
+        if not DEPRECATED_SETTING_KEYS:
+            return
         cursor.executemany(
             'DELETE FROM settings WHERE key = ?',
             ((key,) for key in DEPRECATED_SETTING_KEYS),
+        )
+
+    @staticmethod
+    def _migrate_account_provider(cursor):
+        columns = {
+            row['name'] for row in cursor.execute('PRAGMA table_info(accounts)').fetchall()
+        }
+        if 'provider' not in columns:
+            cursor.execute(
+                "ALTER TABLE accounts ADD COLUMN provider TEXT NOT NULL DEFAULT 'microsoft'"
+            )
+        cursor.execute(
+            "UPDATE accounts SET provider='microsoft' WHERE provider IS NULL OR provider=''"
         )
 
     @staticmethod
@@ -240,14 +299,18 @@ class Database:
     def _sync_account_alias_limits_locked(cursor, max_aliases):
         cursor.execute(
             '''UPDATE accounts SET max_aliases=?, updated_at=CURRENT_TIMESTAMP
-               WHERE max_aliases != ?''',
+               WHERE provider='microsoft' AND max_aliases != ?''',
             (max_aliases, max_aliases),
+        )
+        cursor.execute(
+            '''UPDATE accounts SET max_aliases=1, updated_at=CURRENT_TIMESTAMP
+               WHERE provider!='microsoft' AND max_aliases != 1'''
         )
         cursor.execute(
             '''UPDATE accounts
                SET status = CASE
                        WHEN (SELECT COUNT(*) FROM aliases
-                             WHERE account_id=accounts.id AND status='used') >= ?
+                             WHERE account_id=accounts.id AND status='used') >= accounts.max_aliases
                        THEN 'done'
                        ELSE 'ready'
                    END,
@@ -255,11 +318,10 @@ class Database:
                WHERE status != 'disabled'
                  AND status != CASE
                        WHEN (SELECT COUNT(*) FROM aliases
-                             WHERE account_id=accounts.id AND status='used') >= ?
+                             WHERE account_id=accounts.id AND status='used') >= accounts.max_aliases
                        THEN 'done'
                        ELSE 'ready'
-                   END''',
-            (max_aliases, max_aliases),
+                   END'''
         )
 
     @staticmethod
@@ -390,14 +452,22 @@ class Database:
                 if password:
                     cur.execute(
                         '''UPDATE accounts SET password=?, client_id=?, refresh_token=?,
+                           provider='microsoft', max_aliases=?, status='ready',
                            updated_at=CURRENT_TIMESTAMP WHERE email=?''',
-                        (password, client_id, refresh_token, email)
+                        (
+                            password, client_id, refresh_token,
+                            self._get_max_aliases_setting_locked(cur), email,
+                        )
                     )
                 else:
                     cur.execute(
                         '''UPDATE accounts SET client_id=?, refresh_token=?,
+                           provider='microsoft', max_aliases=?, status='ready',
                            updated_at=CURRENT_TIMESTAMP WHERE email=?''',
-                        (client_id, refresh_token, email)
+                        (
+                            client_id, refresh_token,
+                            self._get_max_aliases_setting_locked(cur), email,
+                        )
                     )
                 self.conn.commit()
                 return existing['id']
@@ -405,12 +475,50 @@ class Database:
                 max_aliases = self._get_max_aliases_setting_locked(cur)
                 cur.execute(
                     '''INSERT INTO accounts (
-                           email, password, client_id, refresh_token, max_aliases
-                       ) VALUES (?, ?, ?, ?, ?)''',
+                           email, password, client_id, refresh_token, provider, max_aliases
+                       ) VALUES (?, ?, ?, ?, 'microsoft', ?)''',
                     (email, password, client_id, refresh_token, max_aliases)
                 )
                 self.conn.commit()
                 return cur.lastrowid
+
+    def create_temporary_account(self, email, provider, credential):
+        """Persist one isolated temporary mailbox for the normal alias scheduler."""
+        try:
+            provider = normalize_provider(provider)
+        except MailProviderError as exc:
+            raise ValueError(str(exc)) from exc
+        if provider == MICROSOFT_PROVIDER:
+            raise ValueError('temporary mailbox provider is required')
+        if not email or not credential:
+            raise ValueError('temporary mailbox address and credential are required')
+        with self._write_lock:
+            cur = self.conn.cursor()
+            existing = cur.execute(
+                'SELECT id, provider FROM accounts WHERE email=?',
+                (email,),
+            ).fetchone()
+            if existing:
+                if existing['provider'] != provider:
+                    raise ValueError(
+                        f'email {email} already belongs to provider {existing["provider"]}'
+                    )
+                cur.execute(
+                    '''UPDATE accounts SET refresh_token=?, client_id='', max_aliases=1,
+                       status='ready', updated_at=CURRENT_TIMESTAMP WHERE id=?''',
+                    (credential, existing['id']),
+                )
+                self.conn.commit()
+                return existing['id']
+            cur.execute(
+                '''INSERT INTO accounts (
+                       email, password, client_id, refresh_token, provider,
+                       status, max_aliases
+                   ) VALUES (?, '', '', ?, ?, 'ready', 1)''',
+                (email, credential, provider),
+            )
+            self.conn.commit()
+            return cur.lastrowid
 
     def delete_accounts(self, ids):
         if not ids:
@@ -540,7 +648,8 @@ class Database:
 
     def _account_disable_reason_locked(self, cursor, account_id):
         account = cursor.execute(
-            'SELECT id, email, status, max_aliases FROM accounts WHERE id = ?',
+            '''SELECT id, email, provider, status, max_aliases
+               FROM accounts WHERE id = ?''',
             (account_id,),
         ).fetchone()
         if not account or account['status'] != 'ready':
@@ -557,6 +666,13 @@ class Database:
         # Never disable an account while another alias is actively using its mailbox.
         if counts['active_cnt']:
             return account, ''
+
+        if (
+            account['provider'] != 'microsoft'
+            and (counts['total_cnt'] or 0) >= 1
+            and (counts['used_cnt'] or 0) < 1
+        ):
+            return account, 'temporary mailbox attempt exhausted'
 
         reason = account_disable_reason(
             consecutive_mail_fails=self._count_consecutive_mail_failed_aliases_locked(
@@ -629,7 +745,7 @@ class Database:
         return recovered
 
     def claim_next_alias(self, max_retries, lease_owner,
-                         lease_seconds=DEFAULT_LEASE_SECONDS):
+                         lease_seconds=DEFAULT_LEASE_SECONDS, provider=None):
         """Atomically lease one alias while allowing only one active alias per account."""
         if not lease_owner:
             raise ValueError('lease_owner is required')
@@ -642,7 +758,7 @@ class Database:
                 lease_expires_at = self._lease_expiry(lease_seconds)
 
                 row = cur.execute(
-                    '''SELECT al.*, a.client_id, a.refresh_token,
+                    '''SELECT al.*, a.client_id, a.refresh_token, a.provider,
                               a.email AS main_email,
                               a.max_aliases AS account_max_aliases
                        FROM aliases al
@@ -656,6 +772,7 @@ class Database:
                            )
                          )
                          AND a.status = 'ready'
+                         AND (? IS NULL OR a.provider = ?)
                          AND NOT EXISTS (
                              SELECT 1 FROM aliases active
                              WHERE active.account_id = al.account_id
@@ -663,7 +780,7 @@ class Database:
                          )
                        ORDER BY al.account_id ASC, al.alias_index ASC
                        LIMIT 1''',
-                    (max_retries, max_retries),
+                    (max_retries, max_retries, provider, provider),
                 ).fetchone()
 
                 if row:
@@ -685,6 +802,7 @@ class Database:
                 account = cur.execute(
                     '''SELECT a.* FROM accounts a
                        WHERE a.status = 'ready'
+                         AND (? IS NULL OR a.provider = ?)
                          AND NOT EXISTS (
                              SELECT 1 FROM aliases active
                              WHERE active.account_id = a.id
@@ -694,9 +812,16 @@ class Database:
                               WHERE account_id = a.id AND status = 'used') < a.max_aliases
                          AND (SELECT COUNT(*) FROM aliases
                               WHERE account_id = a.id) < (a.max_aliases + ?)
+                         AND (
+                             a.provider = 'microsoft'
+                             OR NOT EXISTS (
+                                 SELECT 1 FROM aliases existing
+                                 WHERE existing.account_id = a.id
+                             )
+                         )
                        ORDER BY a.id ASC
                        LIMIT 1''',
-                    (failure_budget,),
+                    (provider, provider, failure_budget),
                 ).fetchone()
                 if not account:
                     self.conn.commit()
@@ -708,7 +833,7 @@ class Database:
                     (account_id,),
                 ).fetchone()[0]
                 main_email = account['email']
-                if next_index == 0:
+                if next_index == 0 or account['provider'] != 'microsoft':
                     alias_email = main_email
                 else:
                     at_pos = main_email.index('@')
@@ -739,6 +864,7 @@ class Database:
                     'lease_expires_at': lease_expires_at,
                     'client_id': account['client_id'],
                     'refresh_token': account['refresh_token'],
+                    'provider': account['provider'],
                     'main_email': main_email,
                     'account_max_aliases': account['max_aliases'],
                 }
@@ -862,7 +988,8 @@ class Database:
             cur = self.conn.cursor()
             # Step 1: prefer existing ready aliases on non-disabled accounts
             row = cur.execute(
-                '''SELECT al.*, a.client_id, a.refresh_token, a.email AS main_email,
+                '''SELECT al.*, a.client_id, a.refresh_token, a.provider,
+                          a.email AS main_email,
                           a.max_aliases AS account_max_aliases
                    FROM aliases al
                    JOIN accounts a ON al.account_id = a.id
@@ -893,6 +1020,13 @@ class Database:
                           WHERE account_id = a.id AND status = 'used') < a.max_aliases
                      AND (SELECT COUNT(*) FROM aliases
                           WHERE account_id = a.id) < (a.max_aliases + ?)
+                     AND (
+                         a.provider = 'microsoft'
+                         OR NOT EXISTS (
+                             SELECT 1 FROM aliases existing
+                             WHERE existing.account_id = a.id
+                         )
+                     )
                    ORDER BY a.id ASC
                    LIMIT 1''',
                 (failure_budget,)
@@ -908,7 +1042,7 @@ class Database:
 
             # Generate alias: index 0 = bare email, index > 0 = plus addressing
             main_email = account['email']
-            if next_index == 0:
+            if next_index == 0 or account['provider'] != 'microsoft':
                 alias_email = main_email
             else:
                 at_pos = main_email.index('@')
@@ -933,6 +1067,7 @@ class Database:
                 'retry_count': 0,
                 'client_id': account['client_id'],
                 'refresh_token': account['refresh_token'],
+                'provider': account['provider'],
                 'main_email': main_email,
                 'account_max_aliases': account['max_aliases'],
             }
@@ -1383,6 +1518,25 @@ class Database:
     def update_settings(self, settings):
         with self._write_lock:
             normalized = dict(settings)
+            if 'email_provider' in normalized:
+                provider = str(normalized['email_provider'] or '').strip().lower()
+                if provider not in SUPPORTED_PROVIDERS:
+                    raise ValueError(
+                        'email_provider must be one of: '
+                        + ', '.join(SUPPORTED_PROVIDERS)
+                    )
+                normalized['email_provider'] = provider
+            if 'cloudflare_auth_mode' in normalized:
+                auth_mode = str(normalized['cloudflare_auth_mode'] or '').strip().lower()
+                valid_modes = {
+                    'none', 'bearer', 'query-key', 'x-api-key', 'x-admin-auth',
+                }
+                if auth_mode not in valid_modes:
+                    raise ValueError(
+                        'cloudflare_auth_mode must be one of: '
+                        + ', '.join(sorted(valid_modes))
+                    )
+                normalized['cloudflare_auth_mode'] = auth_mode
             if MAX_CODE_RETRIES_SETTING_KEY in normalized:
                 normalized[MAX_CODE_RETRIES_SETTING_KEY] = str(
                     self._parse_code_retries(normalized[MAX_CODE_RETRIES_SETTING_KEY])

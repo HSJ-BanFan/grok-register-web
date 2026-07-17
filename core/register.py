@@ -1,7 +1,6 @@
 import logging
 import threading
 import time
-import string
 import random
 import secrets
 import re
@@ -15,18 +14,16 @@ from core.account_activation import (
     CloudflareContext,
     activate_grok_web,
     capture_cloudflare_context,
-    clear_sso_cookies,
     restore_cloudflare_context,
 )
 from core.registration.state import (
-    EMAIL_REQUEST_MIN_INTERVAL,
     DuplicateSSOError,
     ExistingAccountError,
-    RegistrationState,
+    RegistrationState,  # noqa: F401 - public compatibility import
     VerificationRequestError,
     email_request_slot,
     is_xai_permission_denied,
-    submit_is_in_flight,
+    submit_is_in_flight,  # noqa: F401 - public compatibility import
 )
 from core.registration.profile import (
     ProfileSubmitSnapshot,
@@ -40,7 +37,11 @@ from core.registration.signup import (
     SignupPageStage,
     save_signup_diagnostics,
 )
-from core.runtime import resolve_browser_headless, resolve_registration_concurrency
+from core.runtime import (
+    resolve_browser_headless,
+    resolve_registration_backend,
+    resolve_registration_concurrency,
+)
 
 logger = logging.getLogger('register')
 
@@ -62,6 +63,21 @@ class RegistrationEngine:
     def run(self, max_rounds=0, max_retries=3, concurrency=1):
         self.state.status = 'running'
         settings = self.db.get_settings()
+        backend = resolve_registration_backend(settings)
+        logger.info('Registration backend: %s', backend)
+        if backend in ('protocol', 'auto'):
+            # auto currently maps to protocol; browser remains the safe default.
+            if backend == 'auto':
+                logger.info('Registration backend auto → protocol (experimental)')
+            from core.registration.protocol_worker import ProtocolRegistrationWorker
+            ProtocolRegistrationWorker(
+                self.db, self.browser, self.email_mgr, self.socketio, self.state,
+            ).run(
+                max_rounds=max_rounds,
+                max_retries=max_retries,
+                concurrency=concurrency,
+            )
+            return
         concurrency = resolve_registration_concurrency(concurrency)
         batch_id = secrets.token_hex(6)
         claimed_any = threading.Event()
@@ -137,12 +153,27 @@ class RegistrationEngine:
                 self.state.check_pause()
                 if self.state.should_stop():
                     break
-                alias = self.db.claim_next_alias(
-                    max_retries=max_retries,
-                    lease_owner=lease_owner,
-                    lease_seconds=lease_seconds,
-                )
+                if not self.state.reserve_worker_capacity(worker_id, max_rounds):
+                    break
+                try:
+                    alias = self.email_mgr.claim_registration_alias(
+                        settings,
+                        max_retries=max_retries,
+                        lease_owner=lease_owner,
+                        lease_seconds=lease_seconds,
+                    )
+                except Exception as exc:
+                    logger.error('[%s] Email provider failed: %s', worker_id, exc)
+                    self._emit_error(
+                        'EMAIL_PROVIDER',
+                        f'[{worker_id}] Email provider failed: {exc}',
+                        fatal=True,
+                    )
+                    self.state.release_worker_capacity(worker_id)
+                    self.state.stop()
+                    break
                 if not alias:
+                    self.state.release_worker_capacity(worker_id)
                     break
                 claimed_any.set()
 
@@ -150,6 +181,7 @@ class RegistrationEngine:
                     worker_id, alias, max_rounds,
                 )
                 if round_num is None:
+                    self.state.release_worker_capacity(worker_id)
                     self.db.release_alias_claim(alias['id'], lease_owner)
                     break
 
@@ -340,7 +372,8 @@ class RegistrationEngine:
             logger.info(f"Filling email: {alias_email}")
             verification_requested_at = self._fill_email(alias_email)
 
-            # 3. Get verification code
+            # 3. Get verification code. Provider-specific behavior ends here;
+            # every mailbox continues through the same signup flow below.
             self.state.check_pause()
             logger.info("Requesting verification code...")
             code = self.email_mgr.get_code_for_alias(
@@ -352,6 +385,8 @@ class RegistrationEngine:
                 ),
                 main_email=alias.get('main_email'),
                 requested_after=verification_requested_at,
+                provider=alias.get('provider', 'microsoft'),
+                settings=settings,
             )
 
             # 4. Fill code and confirm
@@ -534,7 +569,8 @@ class RegistrationEngine:
                     error=error_msg,
                     duration=duration,
                 )
-                self.state.record_failure(worker_id)
+                if not outcome['lease_lost']:
+                    self.state.record_failure(worker_id)
                 if outcome['lease_lost']:
                     logger.warning(
                         'Existing account %s detected, but alias lease was lost before skip commit',
@@ -602,7 +638,8 @@ class RegistrationEngine:
                     error=error_msg,
                     duration=duration,
                 )
-                self.state.record_failure(worker_id)
+                if released:
+                    self.state.record_failure(worker_id)
                 self.state.stop()
                 logger.error(
                     'Round %s stopped by xAI permission_denied 403; alias %s '
@@ -790,7 +827,20 @@ return {
             try:
                 # If email field is already visible, no entry button is needed.
                 already = self.browser.run_js(r"""
-return !!document.querySelector('input[type="email"], input[name="email"], input[autocomplete="email"]');
+function isVisible(node) {
+  if (!node) return false;
+  const style = window.getComputedStyle(node);
+  if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+  const rect = node.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0;
+}
+const body = String(document.body?.innerText || '').replace(/\s+/g, ' ').trim().toLowerCase();
+const existingNotice = body.includes('existing account found')
+  || body.includes('an account already exists which is associated with this email address');
+if (existingNotice) return false;
+return Array.from(document.querySelectorAll(
+  'input[type="email"], input[name="email"], input[autocomplete="email"]'
+)).some(isVisible);
                 """)
                 if already:
                     logger.info('Email input already visible; skipping email signup button')
@@ -1995,6 +2045,8 @@ return '';
                 ),
                 main_email=alias.get('main_email'),
                 requested_after=requested_at,
+                provider=alias.get('provider', 'microsoft'),
+                settings=settings,
             )
             logger.info('Filling existing-account login verification code: %s', code)
             self._fill_and_confirm_code(code)
@@ -2848,7 +2900,7 @@ return r;
                     if stuck_on_signup_start is None:
                         stuck_on_signup_start = time.time()
                     elif time.time() - stuck_on_signup_start > 20:
-                        raise Exception(f"Stuck on sign-up page with no SSO for 20s — submission likely failed")
+                        raise Exception("Stuck on sign-up page with no SSO for 20s — submission likely failed")
 
             time.sleep(1)
 
