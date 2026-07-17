@@ -17,7 +17,7 @@
     --accent-soft: rgba(56, 189, 248, 0.1);
     --accent-dim: #1c87c0;
     --accent-glow: rgba(34, 158, 217, 0.18);
-    --accent-text: #ffffff;
+    --accent-text: #0b1220;
 
     --violet: #7c6cf0;
     --violet-soft: rgba(124, 108, 240, 0.12);
@@ -76,9 +76,9 @@
     --dur-med: 320ms;
     --dur-slow: 420ms;
 
-    --font-sans: "DM Sans", Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-    --font-display: "Space Grotesk", "DM Sans", Inter, ui-sans-serif, system-ui, sans-serif;
-    --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Consolas, monospace;
+    --font-sans: "DM Sans", "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    --font-display: "Space Grotesk", "DM Sans", "Inter", ui-sans-serif, system-ui, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", "Consolas", monospace;
 }
 
 .dark-theme {
@@ -332,7 +332,7 @@ h1, h2, h3, .card-title, .stat-value, .mini-stat-val, .topbar h1 {
     transform: translateX(2px);
 }
 .nav-item.active {
-    color: #ffffff;
+    color: var(--accent-text);
     background: linear-gradient(135deg, var(--primary), var(--accent));
     box-shadow: 0 10px 24px rgba(34, 158, 217, 0.28);
 }
@@ -669,7 +669,7 @@ h1, h2, h3, .card-title, .stat-value, .mini-stat-val, .topbar h1 {
     flex-shrink: 0;
 }
 .btn-primary {
-    color: #ffffff;
+    color: var(--accent-text);
     background: linear-gradient(135deg, var(--primary), var(--accent));
     box-shadow: 0 10px 24px rgba(34, 158, 217, 0.28);
 }
@@ -917,12 +917,12 @@ h1, h2, h3, .card-title, .stat-value, .mini-stat-val, .topbar h1 {
     height: 6px;
     background: var(--success);
     border-radius: 50%;
-    animation: dotPulse 1.5s ease-in-out infinite;
+    animation: dot-pulse 1.5s ease-in-out infinite;
     flex-shrink: 0;
 }
 .badge-paused { background: var(--warning-soft); color: var(--warning); }
 .badge-stopped { background: rgba(100, 116, 139, 0.12); color: var(--text-muted); }
-@keyframes dotPulse {
+@keyframes dot-pulse {
     0%, 100% { opacity: 1; transform: scale(1); }
     50% { opacity: 0.3; transform: scale(0.7); }
 }
@@ -958,7 +958,7 @@ h1, h2, h3, .card-title, .stat-value, .mini-stat-val, .topbar h1 {
     height: 8px;
     border-radius: 50%;
     background: var(--success);
-    animation: dotPulse 2s ease-in-out infinite;
+    animation: dot-pulse 2s ease-in-out infinite;
 }
 .log-actions { display: flex; gap: 6px; }
 .log-body {
@@ -2065,7 +2065,7 @@ code {
     padding: 0;
     margin: -1px;
     overflow: hidden;
-    clip: rect(0, 0, 0, 0);
+    clip-path: inset(50%);
     white-space: nowrap;
     border: 0;
     opacity: 0;

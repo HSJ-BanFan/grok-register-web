@@ -43,7 +43,7 @@ export async function render(container) {
 
             <div class="import-two-column">
                 <div class="import-column-left">
-                    <div id="drop-zone" class="drop-zone">
+                    <div id="drop-zone" class="drop-zone" role="button" tabindex="0" aria-label="选择要导入的 Microsoft 邮箱账号文本文件">
                         <div class="drop-zone-icon">
                             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
                         </div>
@@ -132,6 +132,12 @@ export async function render(container) {
     const importTextarea = document.getElementById('import-text');
 
     dropZone.addEventListener('click', () => fileInput.click());
+    dropZone.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            fileInput.click();
+        }
+    });
     fileInput.addEventListener('change', handleFileSelect);
 
     ['dragenter', 'dragover'].forEach(eventName => {
@@ -273,6 +279,13 @@ function escapeHtml(str) {
     return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+function textCell(className, value) {
+    const span = document.createElement('span');
+    if (className) span.className = className;
+    span.textContent = String(value ?? '');
+    return span;
+}
+
 function showImportPreview() {
     const text = document.getElementById('import-text').value.trim();
     if (!text) { showToast('请输入或粘贴账号数据，或拖放账号文件', 'warning'); return; }
@@ -339,8 +352,12 @@ export async function loadAccounts() {
     if (!tableContainer) return;
 
     if (!res.success) {
+        accountTable = null;
         updateFoldCount('email-acc-count', 0);
-        tableContainer.innerHTML = '<div class="table-empty">加载失败，请检查网络连接</div>';
+        const error = document.createElement('div');
+        error.className = 'table-empty';
+        error.textContent = '加载失败，请检查网络连接';
+        tableContainer.replaceChildren(error);
         return;
     }
 
@@ -350,18 +367,20 @@ export async function loadAccounts() {
     accountTable = createTable(tableContainer, {
         columns: [
             { title: '#', key: 'id', width: '50px', render: (r, i) => `${i + 1}` },
-            { title: '邮箱账号', key: 'email', render: (r) => `<span class="font-medium">${escapeHtml(r.email)}</span>` },
+            { title: '邮箱账号', key: 'email', render: (r) => textCell('font-medium', r.email) },
             { title: '服务', key: 'provider', width: '105px', render: (r) => {
                 const names = { microsoft: 'Microsoft', duckmail: 'DuckMail', yyds: 'YYDS', cloudflare: 'Cloudflare', cloud_mail: 'Cloud Mail' };
-                return `<span style="font-size:12.5px;">${names[r.provider] || (r.provider ? escapeHtml(r.provider) : 'Microsoft')}</span>`;
+                const provider = textCell('', names[r.provider] || r.provider || 'Microsoft');
+                provider.style.fontSize = '12.5px';
+                return provider;
             }},
             { title: '状态', key: 'status', width: '110px', render: (r) => {
                 const map = { ready: ['badge-ready', '可用别名'], done: ['badge-done', '已用完'], disabled: ['badge-disabled', '已禁用'] };
-                const [cls, text] = map[r.status] || ['', r.status];
-                return `<span class="badge ${cls}">${text}</span>`;
+                const [cls, text] = map[r.status] || ['', r.status || '未知'];
+                return textCell(`badge ${cls}`.trim(), text);
             }},
-            { title: '已用别名', width: '90px', render: (r) => `<span class="mono">${r.used_count || 0} / ${r.max_aliases}</span>` },
-            { title: '注册成功数', width: '90px', render: (r) => `<span class="success-count">${r.success_count || 0}</span>` },
+            { title: '已用别名', width: '90px', render: (r) => textCell('mono', `${r.used_count ?? 0} / ${r.max_aliases ?? 0}`) },
+            { title: '注册成功数', width: '90px', render: (r) => textCell('success-count', r.success_count ?? 0) },
             { title: '操作选项', width: '130px', render: (r) => {
                 const div = document.createElement('div');
                 div.className = 'btn-group';

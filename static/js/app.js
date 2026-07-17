@@ -99,6 +99,12 @@ async function navigate() {
     const mainContent = document.getElementById('main-content');
     if (!mainContent) return;
 
+    if (hash === currentHash && mainContent.childElementCount) {
+        ++navToken;
+        clearPageMotion(mainContent);
+        return;
+    }
+
     const token = ++navToken;
     const reduced = prefersReducedMotion();
 
@@ -113,8 +119,6 @@ async function navigate() {
         }
         return;
     }
-
-    if (hash === currentHash && mainContent.childElementCount) return;
 
     try {
         // 1) Fade old page out and stay at opacity 0 (fill-mode: forwards + hold class)
@@ -139,17 +143,41 @@ async function navigate() {
 function initMobileNav() {
     const menuBtn = document.getElementById('mobile-menu');
     const scrim = document.getElementById('sidebar-scrim');
-    if (!menuBtn || !scrim) return;
+    const sidebar = document.getElementById('sidebar');
+    if (!menuBtn || !scrim || !sidebar) return;
 
-    const close = () => document.body.classList.remove('sidebar-open');
-    const toggle = () => document.body.classList.toggle('sidebar-open');
+    const sync = (open, { focusMenu = false, restoreFocus = false } = {}) => {
+        const mobile = window.innerWidth <= 960;
+        const expanded = mobile && open;
+        document.body.classList.toggle('sidebar-open', expanded);
+        menuBtn.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+        menuBtn.setAttribute('aria-label', expanded ? '关闭导航' : '打开导航');
+        sidebar.setAttribute('aria-hidden', mobile && !expanded ? 'true' : 'false');
+        sidebar.toggleAttribute('inert', mobile && !expanded);
+        scrim.setAttribute('aria-hidden', expanded ? 'false' : 'true');
+        if (expanded && focusMenu) {
+            sidebar.querySelector('.nav-item')?.focus();
+        } else if (!expanded && restoreFocus && mobile) {
+            menuBtn.focus();
+        }
+    };
+    const close = (restoreFocus = false) => sync(false, { restoreFocus });
 
-    menuBtn.addEventListener('click', toggle);
-    scrim.addEventListener('click', close);
-    window.addEventListener('hashchange', close);
-    window.addEventListener('resize', () => {
-        if (window.innerWidth > 960) close();
+    menuBtn.addEventListener('click', () => {
+        const open = !document.body.classList.contains('sidebar-open');
+        sync(open, { focusMenu: open, restoreFocus: !open });
     });
+    scrim.addEventListener('click', () => close(true));
+    window.addEventListener('hashchange', () => close(true));
+    document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape' && document.body.classList.contains('sidebar-open')) {
+            close(true);
+        }
+    });
+    window.addEventListener('resize', () => {
+        sync(document.body.classList.contains('sidebar-open'));
+    });
+    sync(false);
 }
 
 function init() {

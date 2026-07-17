@@ -22,7 +22,19 @@ const ICONS = {
 };
 
 
-function metric(icon, value, label, tone = 'accent', valueClass = '') {
+function svgNode(markup) {
+    const parsed = new DOMParser().parseFromString(markup, 'image/svg+xml');
+    return document.importNode(parsed.documentElement, true);
+}
+
+function textCell(className, value) {
+    const span = document.createElement('span');
+    if (className) span.className = className;
+    span.textContent = String(value ?? '');
+    return span;
+}
+
+function metricNode(icon, value, label, tone = 'accent', valueClass = '') {
     const toneMap = {
         accent: 'var(--accent)',
         success: 'var(--success)',
@@ -32,15 +44,28 @@ function metric(icon, value, label, tone = 'accent', valueClass = '') {
         muted: 'var(--text-secondary)',
     };
     const color = toneMap[tone] || toneMap.accent;
-    const valCls = valueClass ? ` ${valueClass}` : '';
     const display = value == null ? '0' : String(value);
-    return `
-        <div class="stat-card" style="--card-accent: ${color};">
-            <span class="stat-icon" style="color:${color};">${icon}</span>
-            <div class="stat-value count-up${valCls}" style="color:${color};" data-count-value="${display.replace(/"/g, '&quot;')}">0</div>
-            <div class="stat-label">${label}</div>
-        </div>
-    `;
+    const card = document.createElement('div');
+    card.className = 'stat-card';
+    card.style.setProperty('--card-accent', color);
+
+    const iconWrap = document.createElement('span');
+    iconWrap.className = 'stat-icon';
+    iconWrap.style.color = color;
+    iconWrap.setAttribute('aria-hidden', 'true');
+    iconWrap.appendChild(svgNode(icon));
+
+    const metricValue = document.createElement('div');
+    metricValue.className = `stat-value count-up${valueClass ? ` ${valueClass}` : ''}`;
+    metricValue.style.color = color;
+    metricValue.dataset.countValue = display;
+    metricValue.textContent = '0';
+
+    const metricLabel = document.createElement('div');
+    metricLabel.className = 'stat-label';
+    metricLabel.textContent = label;
+    card.append(iconWrap, metricValue, metricLabel);
+    return card;
 }
 
 export async function render(container) {
@@ -176,21 +201,21 @@ async function loadStats() {
     const res = await api('GET', '/api/accounts/stats');
     const grid = document.getElementById('stats-grid');
     if (!grid || !res.success) return;
-    const s = res.data;
-    grid.innerHTML = [
-        metric(ICONS.accounts, s.total_accounts, '主账号总数', 'accent'),
-        metric(ICONS.used, s.used_accounts, '已使用主账号', 'success'),
-        metric(ICONS.unused, s.unused_accounts, '未使用主账号', 'info'),
-        metric(ICONS.done, s.done_accounts, '额度已用完账号', 'muted'),
-        metric(ICONS.aliases, s.total_aliases, '系统别名总数', 'accent'),
-        metric(ICONS.used, s.used_aliases, '已使用别名数', 'success'),
-        metric(ICONS.ready, s.ready_aliases, '待分配别名数', 'info'),
-        metric(ICONS.failed, s.failed_aliases, '失败别名数', 'error'),
-        metric(ICONS.sso, s.total_sso, '成功采集 SSO 数', 'accent'),
-        metric(ICONS.today, s.today_sso, '今日采集 SSO 数', 'info'),
-        metric(ICONS.rate, `${s.success_rate}%`, '别名注册成功率', 'success'),
-        metric(ICONS.duration, `${s.avg_duration}s`, '平均注册耗时', 'warning'),
-    ].join('');
+    const s = res.data || {};
+    grid.replaceChildren(
+        metricNode(ICONS.accounts, s.total_accounts, '主账号总数', 'accent'),
+        metricNode(ICONS.used, s.used_accounts, '已使用主账号', 'success'),
+        metricNode(ICONS.unused, s.unused_accounts, '未使用主账号', 'info'),
+        metricNode(ICONS.done, s.done_accounts, '额度已用完账号', 'muted'),
+        metricNode(ICONS.aliases, s.total_aliases, '系统别名总数', 'accent'),
+        metricNode(ICONS.used, s.used_aliases, '已使用别名数', 'success'),
+        metricNode(ICONS.ready, s.ready_aliases, '待分配别名数', 'info'),
+        metricNode(ICONS.failed, s.failed_aliases, '失败别名数', 'error'),
+        metricNode(ICONS.sso, s.total_sso, '成功采集 SSO 数', 'accent'),
+        metricNode(ICONS.today, s.today_sso, '今日采集 SSO 数', 'info'),
+        metricNode(ICONS.rate, `${s.success_rate ?? 0}%`, '别名注册成功率', 'success'),
+        metricNode(ICONS.duration, `${s.avg_duration ?? 0}s`, '平均注册耗时', 'warning'),
+    );
     animateCountNodes(grid, { duration: 920, stagger: 40 });
 }
 
@@ -203,9 +228,9 @@ async function loadSSO() {
     ssoTable = createTable(el, {
         columns: [
             { title: '#', width: '50px', render: (r, i) => `${i + 1}` },
-            { title: '注册别名邮箱', key: 'email', render: (r) => `<span class="font-medium">${r.email}</span>` },
+            { title: '注册别名邮箱', key: 'email', render: (r) => textCell('font-medium', r.email) },
             { title: 'SSO Session Token', render: (r) => {
-                const sso = r.sso_value || '';
+                const sso = String(r.sso_value || '');
                 const container = document.createElement('div');
                 container.className = 'sso-cell';
 
@@ -216,6 +241,8 @@ async function loadSSO() {
 
                 const btn = document.createElement('button');
                 btn.className = 'copy-btn';
+                btn.type = 'button';
+                btn.setAttribute('aria-label', '复制此 SSO 令牌');
                 btn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
                 btn.addEventListener('click', () => {
                     navigator.clipboard.writeText(sso);
@@ -226,7 +253,7 @@ async function loadSSO() {
                 container.appendChild(btn);
                 return container;
             }},
-            { title: '采集时间', key: 'created_at', width: '150px', render: (r) => r.created_at ? `<span class="time-cell">${r.created_at.substring(0, 16)}</span>` : '' },
+            { title: '采集时间', key: 'created_at', width: '150px', render: (r) => textCell('time-cell', r.created_at ? String(r.created_at).substring(0, 16) : '') },
         ],
         data: rows,
         emptyText: '暂无已采收的 SSO Token 记录',
@@ -242,9 +269,9 @@ async function loadAccounts() {
     accTable = createTable(el, {
         columns: [
             { title: '#', width: '50px', render: (r, i) => `${i + 1}` },
-            { title: '注册别名邮箱账号', key: 'email', render: (r) => `<span class="font-medium">${r.email}</span>` },
-            { title: '登录密码', key: 'account_password', render: (r) => `<span class="mono">${r.account_password}</span>` },
-            { title: '完成时间', key: 'created_at', width: '150px', render: (r) => r.created_at ? `<span class="time-cell">${r.created_at.substring(0, 16)}</span>` : '' },
+            { title: '注册别名邮箱账号', key: 'email', render: (r) => textCell('font-medium', r.email) },
+            { title: '登录密码', key: 'account_password', render: (r) => textCell('mono', r.account_password) },
+            { title: '完成时间', key: 'created_at', width: '150px', render: (r) => textCell('time-cell', r.created_at ? String(r.created_at).substring(0, 16) : '') },
         ],
         data: rows,
         emptyText: '暂无已成功完成注册的邮箱别名记录',

@@ -25,12 +25,17 @@ export function setFoldOpen(card, open, { persist = true } = {}) {
     const key = card.dataset.fold;
     const toggle = card.querySelector('.fold-toggle');
     const hint = card.querySelector('.fold-hint');
+    const body = card.querySelector('.fold-body');
     card.classList.toggle('is-open', open);
     if (toggle) {
         toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
     }
     if (hint) {
         hint.textContent = open ? '点击收起' : '点击展开';
+    }
+    if (body) {
+        body.setAttribute('aria-hidden', open ? 'false' : 'true');
+        body.toggleAttribute('inert', !open);
     }
     if (persist && key) writeFoldOpen(key, open);
 }

@@ -94,7 +94,21 @@ function providerPanel(provider, body) {
 
 export async function render(container) {
     const res = await api('GET', '/api/settings');
-    const s = res.success ? res.data : {};
+    if (!res.success || !res.data) {
+        const error = document.createElement('div');
+        error.className = 'card';
+        const title = document.createElement('div');
+        title.className = 'card-title';
+        title.textContent = '系统设置加载失败';
+        const message = document.createElement('p');
+        message.className = 'card-desc';
+        message.textContent = '当前配置未被修改。请检查服务状态并刷新页面后重试。';
+        error.append(title, message);
+        container.replaceChildren(error);
+        showToast(res.message || '设置加载失败', 'error');
+        return;
+    }
+    const s = res.data;
     const emailProvider = s.email_provider || 'microsoft';
     const registrationBackend = s.registration_backend || 'browser';
     const turnstileProvider = ['external', 'strict_external'].includes(s.turnstile_provider)
@@ -247,7 +261,7 @@ export async function render(container) {
                 </div>
                 <div class="settings-reveal ${passwordMode === 'manual' ? 'is-open' : ''}" id="manual-password-group">
                     <div class="settings-grid settings-grid-1">
-                        ${field('s-manual-password', '自定义统一密码', s.manual_password || '', { type: 'text', mono: true })}
+                        ${field('s-manual-password', '自定义统一密码', s.manual_password || '', { type: 'password', mono: true })}
                     </div>
                 </div>
             `)}

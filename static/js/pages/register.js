@@ -6,6 +6,19 @@ import { countUp } from '../components/count-up.js';
 
 let logPanel = null;
 
+const PAUSE_ICON = `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>`;
+const RESUME_ICON = `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><polygon points="5 3 19 12 5 21 5 3"/></svg>`;
+
+function setPauseButton(paused) {
+    const btn = document.getElementById('pause-btn');
+    if (!btn) return;
+    const markup = paused ? RESUME_ICON : PAUSE_ICON;
+    const parsed = new DOMParser().parseFromString(markup, 'image/svg+xml');
+    const icon = document.importNode(parsed.documentElement, true);
+    btn.dataset.action = paused ? 'resume' : 'pause';
+    btn.replaceChildren(icon, document.createTextNode(paused ? ' 继续任务' : ' 暂停'));
+}
+
 export async function render(container) {
     container.innerHTML = `
         <div class="card">
@@ -102,6 +115,7 @@ async function startRegistration() {
         document.getElementById('reactivate-btn').disabled = true;
         document.getElementById('pause-btn').disabled = false;
         document.getElementById('stop-btn').disabled = false;
+        setPauseButton(false);
     } else {
         showToast(res.message, 'error');
     }
@@ -124,6 +138,7 @@ async function startReactivation() {
         document.getElementById('reactivate-btn').disabled = true;
         document.getElementById('pause-btn').disabled = false;
         document.getElementById('stop-btn').disabled = false;
+        setPauseButton(false);
     } else {
         showToast(res.message, 'error');
     }
@@ -131,13 +146,21 @@ async function startReactivation() {
 
 async function pauseRegistration() {
     const btn = document.getElementById('pause-btn');
-    if (btn.textContent.includes('暂停')) {
-        await api('POST', '/api/register/pause');
-        btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><polygon points="5 3 19 12 5 21 5 3"/></svg> 继续任务`;
+    if (btn.dataset.action !== 'resume') {
+        const res = await api('POST', '/api/register/pause');
+        if (!res.success) {
+            showToast(res.message || '暂停任务失败', 'error');
+            return;
+        }
+        setPauseButton(true);
         showToast('任务已发起暂停指令', 'warning');
     } else {
-        await api('POST', '/api/register/resume');
-        btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg> 暂停`;
+        const res = await api('POST', '/api/register/resume');
+        if (!res.success) {
+            showToast(res.message || '继续任务失败', 'error');
+            return;
+        }
+        setPauseButton(false);
         showToast('任务已继续运行', 'info');
     }
 }
@@ -150,6 +173,7 @@ async function stopRegistration() {
         document.getElementById('reactivate-btn').disabled = false;
         document.getElementById('pause-btn').disabled = true;
         document.getElementById('stop-btn').disabled = true;
+        setPauseButton(false);
     }
 }
 
@@ -251,11 +275,12 @@ function updateStatus(data) {
         document.getElementById('reactivate-btn').disabled = false;
         document.getElementById('pause-btn').disabled = true;
         document.getElementById('stop-btn').disabled = true;
-        document.getElementById('pause-btn').innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg> 暂停`;
+        setPauseButton(false);
     } else {
         document.getElementById('start-btn').disabled = true;
         document.getElementById('reactivate-btn').disabled = true;
         document.getElementById('pause-btn').disabled = false;
         document.getElementById('stop-btn').disabled = false;
+        setPauseButton(data.status === 'paused');
     }
 }

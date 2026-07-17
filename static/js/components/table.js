@@ -3,17 +3,41 @@ export function createTable(container, options) {
     let selectedIds = new Set();
 
     function render() {
-        container.innerHTML = '';
+        container.replaceChildren();
 
         if (!data || data.length === 0) {
-            container.innerHTML = `<div class="table-empty" style="animation: fadeIn 0.4s ease-out;">
-                <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" style="margin-bottom:14px;opacity:0.4;">
-                    <rect x="3" y="3" width="18" height="18" rx="2"/>
-                    <path d="M3 9h18"/>
-                    <path d="M9 21V9"/>
-                </svg>
-                <div style="color:var(--text-muted);font-size:13px;line-height:1.5;">${emptyText}</div>
-            </div>`;
+            const empty = document.createElement('div');
+            empty.className = 'table-empty';
+            empty.style.animation = 'fadeIn 0.4s ease-out';
+
+            const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+            icon.setAttribute('width', '36');
+            icon.setAttribute('height', '36');
+            icon.setAttribute('viewBox', '0 0 24 24');
+            icon.setAttribute('fill', 'none');
+            icon.setAttribute('stroke', 'var(--text-muted)');
+            icon.setAttribute('stroke-width', '1.2');
+            icon.setAttribute('stroke-linecap', 'round');
+            icon.setAttribute('stroke-linejoin', 'round');
+            icon.style.marginBottom = '14px';
+            icon.style.opacity = '0.4';
+            for (const [tag, attrs] of [
+                ['rect', { x: '3', y: '3', width: '18', height: '18', rx: '2' }],
+                ['path', { d: 'M3 9h18' }],
+                ['path', { d: 'M9 21V9' }],
+            ]) {
+                const node = document.createElementNS('http://www.w3.org/2000/svg', tag);
+                Object.entries(attrs).forEach(([name, value]) => node.setAttribute(name, value));
+                icon.appendChild(node);
+            }
+
+            const message = document.createElement('div');
+            message.style.color = 'var(--text-muted)';
+            message.style.fontSize = '13px';
+            message.style.lineHeight = '1.5';
+            message.textContent = String(emptyText ?? '');
+            empty.append(icon, message);
+            container.appendChild(empty);
             return;
         }
 
@@ -76,8 +100,8 @@ export function createTable(container, options) {
                 const td = document.createElement('td');
                 if (col.render) {
                     const content = col.render(row, idx);
-                    if (typeof content === 'string') td.innerHTML = content;
-                    else td.appendChild(content);
+                    if (content instanceof Node) td.appendChild(content);
+                    else td.textContent = String(content ?? '');
                 } else {
                     td.textContent = row[col.key] ?? '';
                 }

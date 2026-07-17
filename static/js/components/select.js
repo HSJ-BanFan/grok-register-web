@@ -51,12 +51,27 @@ function restoreMenu(wrap, menu) {
     else menu.remove();
 }
 
+function setActiveOption(wrap, option) {
+    const menu = getMenu(wrap);
+    const trigger = wrap?.querySelector('.ui-select-trigger');
+    menu?.querySelectorAll('.ui-select-option.is-active').forEach((el) => {
+        el.classList.remove('is-active');
+    });
+    if (option) {
+        option.classList.add('is-active');
+        if (trigger && option.id) trigger.setAttribute('aria-activedescendant', option.id);
+    } else {
+        trigger?.removeAttribute('aria-activedescendant');
+    }
+}
+
 function closeSelect(wrap) {
     if (!wrap) return;
     wrap.classList.remove('is-open', 'is-drop-up');
     const trigger = wrap.querySelector('.ui-select-trigger');
     const menu = getMenu(wrap);
     if (trigger) trigger.setAttribute('aria-expanded', 'false');
+    trigger?.removeAttribute('aria-activedescendant');
     if (menu) {
         menu.hidden = true;
         clearMenuPosition(menu);
@@ -92,7 +107,7 @@ function openSelect(wrap) {
     positionMenu(wrap);
 
     if (active) {
-        active.classList.add('is-active');
+        setActiveOption(wrap, active);
         // scroll into view without jumping the page
         try {
             active.scrollIntoView({ block: 'nearest' });
@@ -185,9 +200,8 @@ function moveActive(wrap, delta) {
     if (idx < 0) idx = 0;
     else idx = (idx + delta + options.length) % options.length;
 
-    options.forEach((o) => o.classList.remove('is-active'));
     const next = options[idx];
-    next.classList.add('is-active');
+    setActiveOption(wrap, next);
     try {
         next.scrollIntoView({ block: 'nearest' });
     } catch {
@@ -261,9 +275,8 @@ function bindSelect(wrap) {
             event.preventDefault();
             const options = Array.from(menu.querySelectorAll('.ui-select-option'));
             if (!options.length) return;
-            options.forEach((o) => o.classList.remove('is-active'));
             const target = key === 'Home' ? options[0] : options[options.length - 1];
-            target.classList.add('is-active');
+            setActiveOption(wrap, target);
             try { target.scrollIntoView({ block: 'nearest' }); } catch { /* ignore */ }
         }
     });
@@ -280,10 +293,7 @@ function bindSelect(wrap) {
     menu.addEventListener('mousemove', (event) => {
         const option = event.target.closest('.ui-select-option');
         if (!option || !menu.contains(option)) return;
-        menu.querySelectorAll('.ui-select-option.is-active').forEach((el) => {
-            el.classList.remove('is-active');
-        });
-        option.classList.add('is-active');
+        setActiveOption(wrap, option);
     });
 }
 
@@ -358,11 +368,12 @@ export function selectFieldMarkup(id, label, current, options, { helper = '', mo
         return `<option value="${escapeAttr(value)}"${value === activeValue ? ' selected' : ''}>${escapeHtml(option.label)}</option>`;
     }).join('');
 
-    const listOptions = options.map((option) => {
+    const listOptions = options.map((option, index) => {
         const value = String(option.value);
         const selected = value === activeValue;
         return `
             <li class="ui-select-option${selected ? ' is-selected' : ''}"
+                id="${escapeAttr(id)}-option-${index}"
                 role="option"
                 data-value="${escapeAttr(value)}"
                 aria-selected="${selected ? 'true' : 'false'}"
@@ -383,6 +394,7 @@ export function selectFieldMarkup(id, label, current, options, { helper = '', mo
                 <button type="button"
                     class="ui-select-trigger"
                     id="${escapeAttr(id)}-trigger"
+                    role="combobox"
                     aria-haspopup="listbox"
                     aria-expanded="false"
                     aria-controls="${escapeAttr(id)}-menu"

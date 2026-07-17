@@ -38,7 +38,10 @@ function currentHash() {
 function setActive(container) {
     const hash = currentHash();
     container.querySelectorAll('.nav-item').forEach((btn) => {
-        btn.classList.toggle('active', btn.dataset.hash === hash);
+        const active = btn.dataset.hash === hash;
+        btn.classList.toggle('active', active);
+        if (active) btn.setAttribute('aria-current', 'page');
+        else btn.removeAttribute('aria-current');
     });
 }
 

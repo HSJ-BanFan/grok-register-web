@@ -88,7 +88,7 @@ bg-aurora (fixed mesh blobs)
 ### 组件语言
 
 - Primary button = `linear-gradient(135deg, primary, accent)` + soft blue shadow
-- Active nav = 同色渐变 + 白色文字
+- Active nav = 同色渐变 + `accent-text` 高对比前景色
 - Card title left bar = 4px primary→accent pill
 - Metric cards = soft corner glow, hover lift 2px
 - Log panel stays terminal-dark for contrast
