@@ -752,12 +752,7 @@ class Database:
                 row = cur.execute(
                     '''SELECT al.*, a.client_id, a.refresh_token, a.provider,
                               a.email AS main_email,
-                              a.max_aliases AS account_max_aliases,
-                              EXISTS (
-                                  SELECT 1 FROM registrations prior
-                                  WHERE prior.alias_id = al.id
-                                    AND prior.status = 'skipped'
-                              ) AS existing_account
+                              a.max_aliases AS account_max_aliases
                        FROM aliases al
                        JOIN accounts a ON al.account_id = a.id
                        WHERE al.status = 'ready'
@@ -864,7 +859,6 @@ class Database:
                     'provider': account['provider'],
                     'main_email': main_email,
                     'account_max_aliases': account['max_aliases'],
-                    'existing_account': False,
                 }
             except Exception:
                 self.conn.rollback()
@@ -988,12 +982,7 @@ class Database:
             row = cur.execute(
                 '''SELECT al.*, a.client_id, a.refresh_token, a.provider,
                           a.email AS main_email,
-                          a.max_aliases AS account_max_aliases,
-                          EXISTS (
-                              SELECT 1 FROM registrations prior
-                              WHERE prior.alias_id = al.id
-                                AND prior.status = 'skipped'
-                          ) AS existing_account
+                          a.max_aliases AS account_max_aliases
                    FROM aliases al
                    JOIN accounts a ON al.account_id = a.id
                    WHERE al.status = 'ready'
@@ -1073,7 +1062,6 @@ class Database:
                 'provider': account['provider'],
                 'main_email': main_email,
                 'account_max_aliases': account['max_aliases'],
-                'existing_account': False,
             }
 
     def count_consecutive_mail_failed_aliases(self, account_id: int) -> int:

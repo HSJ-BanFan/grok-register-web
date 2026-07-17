@@ -188,33 +188,5 @@ class TemporaryMailboxDatabaseTest(unittest.TestCase):
         ).fetchall()
         self.assertEqual([row['alias_email'] for row in aliases], ['temp@duck.test'])
 
-    def test_skipped_alias_is_claimed_as_known_existing_account_after_reset(self):
-        account_id = self.db.create_temporary_account(
-            'existing@duck.test', 'duckmail', 'mailbox-token',
-        )
-        alias = self.db.claim_next_alias(
-            2, 'worker-1', lease_seconds=60, provider='duckmail',
-        )
-        reg_id = self.db.create_registration(
-            alias['id'], alias['alias_email'], 'password', 1,
-            lease_owner='worker-1',
-        )
-        self.db.skip_existing_account_attempt(
-            reg_id,
-            alias['id'],
-            'worker-1',
-            '注册邮箱已存在：xAI reports Existing account found',
-            duration=1,
-        )
-        self.db.reset_account(account_id)
-
-        reclaimed = self.db.claim_next_alias(
-            2, 'worker-2', lease_seconds=60, provider='duckmail',
-        )
-
-        self.assertEqual(reclaimed['id'], alias['id'])
-        self.assertEqual(reclaimed['existing_account'], 1)
-
-
 if __name__ == '__main__':
     unittest.main()
