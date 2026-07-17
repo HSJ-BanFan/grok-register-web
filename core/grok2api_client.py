@@ -361,17 +361,49 @@ class Grok2APIClient:
 
 
 def upload_registered_sso(settings, sso_cookie, email='', user_agent='', cloudflare_cookies=''):
-    if settings.get('grok2api_auto_upload', 'false') != 'true':
-        logger.info('grok2api auto upload disabled; skipping Web import and Build conversion')
-        return None
+    """Deliver a successful registration to optional backends.
+
+    - CPA (CLIProxyAPI) hotload when ``cpa_auto_export`` is true.
+    - grok2api Web import + Build convert when ``grok2api_auto_upload`` is true.
+    Either path may run alone; failures on an enabled path raise so durable retry can re-run.
+    """
+    result = {}
+    cpa_enabled = (settings.get('cpa_auto_export') or 'false').lower() == 'true'
+    grok_enabled = (settings.get('grok2api_auto_upload') or 'false').lower() == 'true'
+
+    if cpa_enabled:
+        try:
+            from core.cpa_export import export_sso_to_cpa
+            result['cpa'] = export_sso_to_cpa(settings, sso_cookie, email=email)
+        except Exception as exc:
+            raise Grok2APIError(f'CPA export failed: {exc}') from exc
+
+    if not grok_enabled:
+        if not cpa_enabled:
+            logger.info('No delivery backend enabled (cpa_auto_export / grok2api_auto_upload)')
+        return result if result else None
+
     base_url = settings.get('grok2api_url', '').strip()
     username = settings.get('grok2api_username', '').strip()
     password = settings.get('grok2api_password', '')
     if not base_url or not username or not password:
+        if cpa_enabled:
+            logger.warning('grok2api enabled but incomplete credentials; CPA-only')
+            return result
         raise Grok2APIError('grok2api auto upload is enabled but URL/username/password is incomplete')
+
     client = Grok2APIClient(base_url, username, password)
     logger.info('grok2api auto pipeline started: account=%s endpoint=%s', email or '(unnamed)', base_url)
     if user_agent and cloudflare_cookies:
         logger.info('Updating grok2api Grok Web egress Cloudflare context...')
         client.upsert_web_egress_context(user_agent, cloudflare_cookies)
-    return client.import_web_sso_and_convert(sso_cookie, email=email)
+    try:
+        result['grok2api'] = client.import_web_sso_and_convert(sso_cookie, email=email)
+    except Exception as exc:
+        if cpa_enabled:
+            # CPA already succeeded; do not fail the whole delivery on secondary backend.
+            logger.warning('grok2api pipeline failed after CPA export (ignored): %s', exc)
+            result['grok2api_error'] = str(exc)
+            return result
+        raise
+    return result

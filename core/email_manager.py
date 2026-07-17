@@ -1,8 +1,12 @@
+import email as emaillib
+import imaplib
 import logging
 import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from email.header import decode_header, make_header
+from email.utils import parsedate_to_datetime
 
 import requests
 
@@ -31,7 +35,7 @@ class EmailManager:
     def __init__(self, db):
         self.db = db
         self.providers = TemporaryMailboxProviders()
-        self._seen_message_ids = {'graph': set(), 'outlook': set()}
+        self._seen_message_ids = {'graph': set(), 'outlook': set(), 'imap': set()}
         self._seen_message_lock = threading.Lock()
 
     def claim_registration_alias(self, settings, max_retries, lease_owner,
@@ -83,13 +87,25 @@ class EmailManager:
                 self._seen_message_ids[mail_api] = set(list(known)[-1000:])
 
     def refresh_token(self, account_id, client_id, old_refresh_token):
-        """Refresh a mail token and match it to its authorized API audience."""
+        """Refresh a mail token and match it to its authorized API audience.
+
+        Imported consumer tokens (M.C… / client dbc8e03a-…) typically only grant
+        IMAP/POP opaque tokens. Graph Mail.Read and Outlook REST often fail;
+        empty-scope refresh + IMAP XOAUTH2 is the working path for those.
+        """
         endpoints = [
-            # Legacy imported tokens commonly issue opaque Outlook REST tokens
-            # only when no scope override is supplied.
+            # Legacy imported tokens: empty scope → opaque IMAP token
             (TOKEN_URL, {}),
             ('https://login.microsoftonline.com/consumers/oauth2/v2.0/token', {}),
-            # Newly authorized accounts use Microsoft Graph Mail.Read.
+            (
+                TOKEN_URL,
+                {'scope': 'https://outlook.office.com/IMAP.AccessAsUser.All offline_access'},
+            ),
+            (
+                TOKEN_URL,
+                {'scope': 'https://graph.microsoft.com/.default offline_access'},
+            ),
+            # Newly authorized Graph Mail.Read accounts
             (
                 'https://login.microsoftonline.com/consumers/oauth2/v2.0/token',
                 {'scope': SCOPES},
@@ -111,10 +127,11 @@ class EmailManager:
                 except ValueError:
                     token_data = {}
                 logger.info(
-                    'Token endpoint: status=%s, has_access_token=%s, error=%s',
+                    'Token endpoint: status=%s, has_access_token=%s, error=%s, scope_extra=%s',
                     response.status_code,
                     bool(token_data.get('access_token')),
                     token_data.get('error', 'none'),
+                    extra.get('scope', '<empty>')[:60] if extra else '<empty>',
                 )
                 access_token = token_data.get('access_token')
                 if access_token:
@@ -129,7 +146,7 @@ class EmailManager:
                             len(access_token),
                         )
                         return new_token, access_token, mail_api
-                    errors.append(probe_error)
+                    errors.append(probe_error or 'all mail probes failed')
                     continue
 
                 description = str(
@@ -188,6 +205,15 @@ class EmailManager:
                         received_after=requested_after,
                         seen_message_ids=seen_message_ids,
                     )
+                elif mail_api == 'imap':
+                    code = self._imap_get_code(
+                        access_token,
+                        mailbox_email=main_email or email_addr,
+                        target_email=email_addr,
+                        main_email=main_email,
+                        received_after=requested_after,
+                        seen_message_ids=seen_message_ids,
+                    )
                 else:
                     code = self._outlook_get_code(
                         access_token,
@@ -225,7 +251,7 @@ class EmailManager:
             f'Failed to get verification code after {max_retries} attempts'
         )
 
-    def _detect_mail_api(self, access_token):
+    def _detect_mail_api(self, access_token, mailbox_email=None):
         """Return the mail API authorized for an imported access token."""
         probes = (
             (
@@ -259,7 +285,44 @@ class EmailManager:
                 f'{name} probe HTTP {response.status_code}'
                 f'{f" ({detail})" if detail else ""}'
             )
+
+        # Legacy MSA tokens: opaque access tokens only work with IMAP XOAUTH2.
+        # mailbox_email is optional here; full IMAP is validated in _imap_get_code.
+        if access_token and access_token.count('.') == 0:
+            # Opaque MSA token — try a lightweight IMAP authenticate if email known
+            if mailbox_email:
+                try:
+                    self._imap_probe(access_token, mailbox_email)
+                    return 'imap', ''
+                except Exception as exc:
+                    errors.append(f'imap probe: {exc}')
+            else:
+                # Defer full check; mark as imap-capable opaque token
+                return 'imap', ''
         return None, '; '.join(errors)
+
+    def _imap_probe(self, access_token, mailbox_email):
+        """Authenticate IMAP with XOAUTH2; raises on failure."""
+        auth_string = f'user={mailbox_email}\x01auth=Bearer {access_token}\x01\x01'
+        last_err = None
+        for host in ('outlook.office365.com', 'imap-mail.outlook.com'):
+            try:
+                client = imaplib.IMAP4_SSL(host, 993, timeout=30)
+                try:
+                    typ, _ = client.authenticate(
+                        'XOAUTH2', lambda _x: auth_string.encode()
+                    )
+                    if typ == 'OK':
+                        client.logout()
+                        return host
+                finally:
+                    try:
+                        client.logout()
+                    except Exception:
+                        pass
+            except Exception as exc:
+                last_err = exc
+        raise EmailError(f'IMAP XOAUTH2 failed: {last_err}')
 
     @staticmethod
     def _normalize_email(value):
@@ -598,6 +661,163 @@ class EmailManager:
 
         logger.debug('No verification code found via Outlook REST')
         return None
+
+
+    def _imap_get_code(self, access_token, mailbox_email, target_email=None,
+                       main_email=None, received_after=None, seen_message_ids=None):
+        """Fetch verification mail via IMAP XOAUTH2 (legacy MSA opaque tokens)."""
+        import html as html_module
+
+        mailbox_email = (mailbox_email or main_email or target_email or '').strip()
+        if not mailbox_email:
+            raise EmailError('IMAP mail fetch requires mailbox email')
+        logger.info(
+            'IMAP _imap_get_code: mailbox=%s token_len=%s',
+            mailbox_email,
+            len(access_token or ''),
+        )
+        cutoff = received_after or datetime.now(timezone.utc) - timedelta(minutes=5)
+        if cutoff.tzinfo is None:
+            cutoff = cutoff.replace(tzinfo=timezone.utc)
+        seen_message_ids = seen_message_ids if seen_message_ids is not None else set()
+        auth_string = f'user={mailbox_email}\x01auth=Bearer {access_token}\x01\x01'
+
+        client = None
+        last_err = None
+        for host in ('outlook.office365.com', 'imap-mail.outlook.com'):
+            try:
+                client = imaplib.IMAP4_SSL(host, 993, timeout=45)
+                typ, _ = client.authenticate(
+                    'XOAUTH2', lambda _x: auth_string.encode()
+                )
+                if typ != 'OK':
+                    raise EmailError(f'IMAP AUTHENTICATE not OK on {host}: {typ}')
+                logger.info('IMAP authenticated on %s', host)
+                break
+            except Exception as exc:
+                last_err = exc
+                logger.warning('IMAP connect/auth failed on %s: %s', host, exc)
+                try:
+                    if client:
+                        client.logout()
+                except Exception:
+                    pass
+                client = None
+        if client is None:
+            raise EmailPermissionError(f'IMAP XOAUTH2 failed: {last_err}')
+
+        keywords = (
+            'x.ai', 'xai', 'grok', 'verification',
+            'code', 'confirm', 'confirmation',
+        )
+        fallback_codes = []
+        try:
+            typ, _ = client.select('INBOX')
+            if typ != 'OK':
+                raise EmailError(f'IMAP SELECT INBOX failed: {typ}')
+            # Recent messages first
+            typ, data = client.search(None, 'ALL')
+            if typ != 'OK' or not data or not data[0]:
+                return None
+            ids = data[0].split()
+            # scan last 40 messages newest-first
+            for msg_id in reversed(ids[-40:]):
+                mid = msg_id.decode() if isinstance(msg_id, bytes) else str(msg_id)
+                fingerprint = f'imap:{mid}'
+                if fingerprint in seen_message_ids:
+                    continue
+                typ, msg_data = client.fetch(msg_id, '(RFC822)')
+                if typ != 'OK' or not msg_data or not msg_data[0]:
+                    continue
+                raw = msg_data[0][1]
+                if not isinstance(raw, (bytes, bytearray)):
+                    continue
+                msg = emaillib.message_from_bytes(raw)
+                subject = str(make_header(decode_header(msg.get('Subject', '') or '')))
+                sender = str(make_header(decode_header(msg.get('From', '') or '')))
+                to_hdr = str(make_header(decode_header(msg.get('To', '') or '')))
+                date_hdr = msg.get('Date') or ''
+                received_at = None
+                try:
+                    if date_hdr:
+                        received_at = parsedate_to_datetime(date_hdr)
+                        if received_at.tzinfo is None:
+                            received_at = received_at.replace(tzinfo=timezone.utc)
+                        else:
+                            received_at = received_at.astimezone(timezone.utc)
+                except Exception:
+                    received_at = None
+                if received_at and received_at < cutoff:
+                    seen_message_ids.add(fingerprint)
+                    continue
+
+                body_parts = []
+                if msg.is_multipart():
+                    for part in msg.walk():
+                        ctype = part.get_content_type()
+                        if ctype in ('text/plain', 'text/html'):
+                            try:
+                                payload = part.get_payload(decode=True) or b''
+                                charset = part.get_content_charset() or 'utf-8'
+                                text_part = payload.decode(charset, errors='replace')
+                            except Exception:
+                                continue
+                            if ctype == 'text/html':
+                                text_part = re.sub(
+                                    r'\s+',
+                                    ' ',
+                                    re.sub(
+                                        r'<[^>]+>',
+                                        ' ',
+                                        html_module.unescape(text_part),
+                                    ),
+                                ).strip()
+                            body_parts.append(text_part)
+                else:
+                    try:
+                        payload = msg.get_payload(decode=True) or b''
+                        charset = msg.get_content_charset() or 'utf-8'
+                        body_parts.append(payload.decode(charset, errors='replace'))
+                    except Exception:
+                        pass
+                body = '\n'.join(body_parts)
+                combined = f'{subject} {sender} {to_hdr} {body}'.lower()
+                if not any(keyword in combined for keyword in keywords):
+                    seen_message_ids.add(fingerprint)
+                    continue
+                code = self._extract_code_from_email(f'{subject}\n{body}')
+                if not code:
+                    seen_message_ids.add(fingerprint)
+                    continue
+                seen_message_ids.add(fingerprint)
+                recipients = []
+                for hdr in (to_hdr, msg.get('Cc', '') or '', msg.get('Delivered-To', '') or ''):
+                    for m in re.findall(r'[\w.+-]+@[\w.-]+', str(hdr)):
+                        recipients.append(m.lower())
+                matched = self._recipient_match(recipients, target_email, main_email)
+                if matched is True:
+                    return code
+                if matched is None and self._allow_ambiguous_recipient_fallback(
+                    target_email, main_email,
+                ):
+                    fallback_codes.append(code)
+
+            if len(fallback_codes) == 1:
+                logger.info(
+                    'IMAP recipient metadata was ambiguous; using the only new xAI message'
+                )
+                return fallback_codes[0]
+            if len(fallback_codes) > 1:
+                logger.warning(
+                    'IMAP returned multiple new xAI messages without an exact recipient match'
+                )
+            logger.debug('No verification code found via IMAP')
+            return None
+        finally:
+            try:
+                client.logout()
+            except Exception:
+                pass
 
     @staticmethod
     def _mail_api_error(response):

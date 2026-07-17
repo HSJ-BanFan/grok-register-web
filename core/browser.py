@@ -176,13 +176,31 @@ class BrowserManager:
         co.set_argument('--disable-infobars')
         co.set_argument('--lang=en-US')
         co.set_argument('--window-size=1365,900')
+        # Docker / root chromium needs these or startup hangs / crashes.
+        for _flag in (
+            '--no-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
+            '--disable-software-rasterizer',
+            '--mute-audio',
+            '--disable-background-networking',
+            '--remote-allow-origins=*',
+        ):
+            co.set_argument(_flag)
         co.set_pref('credentials_enable_service', False)
         co.set_pref('profile.password_manager_enabled', False)
 
         proxy = (self.proxy or '').strip()
         if proxy:
+            # DrissionPage set_proxy only supports HTTP(S). Chrome accepts socks5 via
+            # --proxy-server; never call set_proxy for socks or startup can hang.
+            scheme = proxy.split('://', 1)[0].lower() if '://' in proxy else 'http'
+            chrome_proxy = proxy
+            if scheme.startswith('socks'):
+                # normalize socks5h -> socks5 for Chromium
+                chrome_proxy = 'socks5://' + proxy.split('://', 1)[1]
             applied = False
-            if hasattr(co, 'set_proxy'):
+            if scheme in ('http', 'https') and hasattr(co, 'set_proxy'):
                 try:
                     co.set_proxy(proxy)
                     applied = True
@@ -190,19 +208,15 @@ class BrowserManager:
                     logger.warning('set_proxy failed, falling back to --proxy-server: %s', exc)
             if not applied:
                 try:
-                    co.set_argument(f'--proxy-server={proxy}')
+                    co.set_argument(f'--proxy-server={chrome_proxy}')
                     applied = True
-                except Exception:
-                    try:
-                        co.set_argument('--proxy-server', proxy)
-                        applied = True
-                    except Exception as exc:
-                        logger.warning(
-                            'Failed to apply browser proxy %s: %s',
-                            redact_proxy_url(proxy), exc,
-                        )
+                except Exception as exc:
+                    logger.warning(
+                        'Failed to apply browser proxy %s: %s',
+                        redact_proxy_url(proxy), exc,
+                    )
             if applied:
-                logger.info('Browser proxy enabled: %s', redact_proxy_url(proxy))
+                logger.info('Browser proxy enabled: %s', redact_proxy_url(chrome_proxy))
 
         runtime_user_data_path = self._prepare_user_data_path()
         co.set_user_data_path(runtime_user_data_path)
@@ -220,7 +234,7 @@ class BrowserManager:
         result = [None]
         error = [None]
         paths = _browser_path_candidates(self.browser_path, co.browser_path)
-        start_timeout = 45 if self.user_data_path else 20
+        start_timeout = int(os.environ.get("GROK_REGISTER_BROWSER_START_TIMEOUT", "90"))
 
         for index, browser_path in enumerate(paths):
             result[0] = None

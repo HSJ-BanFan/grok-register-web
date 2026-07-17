@@ -9,6 +9,7 @@ const ICONS = {
     browser: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>`,
     user: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`,
     upload: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>`,
+    server: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>`,
     folder: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>`,
     save: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>`,
     reset: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>`,
@@ -120,6 +121,9 @@ export async function render(container) {
     const extractNumbers = s.extract_numbers_enabled === 'true' ? 'true' : 'false';
     const passwordMode = s.password_mode === 'manual' ? 'manual' : 'auto';
     const grok2apiUpload = s.grok2api_auto_upload === 'true' ? 'true' : 'false';
+    const cpaAuto = s.cpa_auto_export === 'true' ? 'true' : 'false';
+    const cpaProbe = s.cpa_probe_chat === 'false' ? 'false' : 'true';
+    const cpaPool = s.cpa_pool_enabled === 'true' ? 'true' : 'false';
     const webActivation = s.grok_web_activation === 'true' ? 'true' : 'false';
     const exportFormat = s.export_format === 'json' ? 'json' : 'txt';
 
@@ -129,7 +133,7 @@ export async function render(container) {
                 <div class="settings-hero-main">
                     <div class="card-title">${ICONS.gear} 系统设置中心</div>
                     <p class="card-desc settings-hero-desc">
-                        配置邮箱服务、注册后端、浏览器策略与 grok2api 流程。分区保存，后续任务立即生效。
+                        配置邮箱服务、注册后端、浏览器策略、CPA 热池补号与 grok2api 流程。分区保存，后续任务立即生效。
                     </p>
                 </div>
                 <div class="settings-hero-meta">
@@ -263,6 +267,45 @@ export async function render(container) {
                     <div class="settings-grid settings-grid-1">
                         ${field('s-manual-password', '自定义统一密码', s.manual_password || '', { type: 'password', mono: true })}
                     </div>
+                </div>
+            `)}
+
+            ${section(ICONS.server, 'CPA 接入与补号', '注册成功后 mint OAuth 并热载到 CLIProxyAPI；号池低于下限自动注册，达到上限自动暂停。', `
+                <div class="settings-two-col">
+                    <div class="settings-field-block">
+                        <div class="settings-field-label">注册成功后导出到 CPA</div>
+                        ${choiceGroup('cpa-auto', [
+                            { value: 'false', title: '关闭', desc: '不写 CPA 凭证文件（默认）。', recommend: true },
+                            { value: 'true', title: '开启 CPA 热载', desc: 'SSO → device OAuth → chat probe → auths/。' },
+                        ], cpaAuto)}
+                    </div>
+                    <div class="settings-field-block">
+                        <div class="settings-field-label">Chat 可用性探测</div>
+                        ${choiceGroup('cpa-probe', [
+                            { value: 'true', title: '开启 probe', desc: 'chat 403 进 dead，避免污染热池。', recommend: true },
+                            { value: 'false', title: '跳过 probe', desc: 'mint 成功即热载（可能含不能聊的号）。' },
+                        ], cpaProbe)}
+                    </div>
+                </div>
+                <div class="settings-grid">
+                    ${field('s-cpa-auth-dir', '热池目录 (cpa/auths)', s.cpa_auth_dir || '/cpa/auths', { type: 'text', mono: true })}
+                    ${field('s-cpa-dead-dir', 'Dead 目录', s.cpa_dead_dir || '/cpa/auths-chat-dead', { type: 'text', mono: true })}
+                    ${field('s-cpa-proxy', 'CPA / probe 代理', s.cpa_proxy || s.browser_proxy || '', { type: 'text', mono: true, placeholder: 'socks5://warp:1080' })}
+                    ${field('s-cpa-probe-delay', 'Probe 前延迟 (秒)', s.cpa_probe_delay_sec || 45, { min: 0, helper: '新号 mint 后常需等待 chat 权限生效。' })}
+                    ${field('s-cpa-probe-retries', 'Probe 失败重试次数', s.cpa_probe_retries || 2, { min: 0 })}
+                    ${field('s-cpa-probe-gap', '重试间隔 (秒)', s.cpa_probe_retry_gap_sec || 60, { min: 0 })}
+                </div>
+                <div class="settings-field-block">
+                    <div class="settings-field-label">热池自动补号（systemd pool keeper 读取）</div>
+                    ${choiceGroup('cpa-pool', [
+                        { value: 'false', title: '关闭', desc: '仅手动注册（默认）。', recommend: true },
+                        { value: 'true', title: '开启自动补号', desc: '低于下限自动注册；达到上限自动暂停（需外部 timer 调 /api/register/*）。' },
+                    ], cpaPool)}
+                </div>
+                <div class="settings-grid">
+                    ${field('s-cpa-pool-min', '热池下限 (低于则补)', s.cpa_pool_min || 5, { min: 0, helper: '统计未禁用且 JWT 未过期的 xai-*.json' })}
+                    ${field('s-cpa-pool-max', '热池上限 (达到则暂停)', s.cpa_pool_max || 5, { min: 0 })}
+                    ${field('s-cpa-pool-rounds', '每次自动注册轮数', s.cpa_pool_register_rounds || 8, { min: 1, max: 30 })}
                 </div>
             `)}
 
@@ -401,6 +444,18 @@ function collectSettings() {
         grok2api_url: document.getElementById('s-grok2api-url').value,
         grok2api_username: document.getElementById('s-grok2api-username').value,
         grok2api_password: document.getElementById('s-grok2api-password').value,
+        cpa_auto_export: document.querySelector('input[name="cpa-auto"]:checked')?.value || 'false',
+        cpa_probe_chat: document.querySelector('input[name="cpa-probe"]:checked')?.value || 'true',
+        cpa_auth_dir: document.getElementById('s-cpa-auth-dir')?.value.trim() || '/cpa/auths',
+        cpa_dead_dir: document.getElementById('s-cpa-dead-dir')?.value.trim() || '/cpa/auths-chat-dead',
+        cpa_proxy: document.getElementById('s-cpa-proxy')?.value.trim() || '',
+        cpa_probe_delay_sec: document.getElementById('s-cpa-probe-delay')?.value || '45',
+        cpa_probe_retries: document.getElementById('s-cpa-probe-retries')?.value || '2',
+        cpa_probe_retry_gap_sec: document.getElementById('s-cpa-probe-gap')?.value || '60',
+        cpa_pool_enabled: document.querySelector('input[name="cpa-pool"]:checked')?.value || 'false',
+        cpa_pool_min: document.getElementById('s-cpa-pool-min')?.value || '5',
+        cpa_pool_max: document.getElementById('s-cpa-pool-max')?.value || '5',
+        cpa_pool_register_rounds: document.getElementById('s-cpa-pool-rounds')?.value || '8',
     };
 }
 
