@@ -98,6 +98,57 @@ class RegistrationReliabilityTest(unittest.TestCase):
         )
         engine._restart_browser.assert_called_once_with(force_close=True)
 
+    @patch('core.register.time.sleep')
+    def test_existing_account_recovery_falls_back_to_signin_route(self, _sleep):
+        engine, _db, email = self._engine()
+        alias = self._alias()
+        alias['provider'] = 'cloud_mail'
+        engine._click_existing_account_email_login = Mock(return_value=True)
+        engine._detect_existing_account_notice = Mock(return_value='Existing account found')
+        engine._dismiss_cookie_banner = Mock()
+        engine._profile_completion_reason = Mock(return_value='sso-cookie:20')
+
+        recovered = engine._recover_existing_account_session(
+            alias,
+            {**self._settings(), 'cloud_mail_api_base': 'https://mail.example'},
+        )
+
+        self.assertTrue(recovered)
+        engine.browser.page.get.assert_called_once_with(
+            'https://accounts.x.ai/sign-in?redirect=grok-com'
+        )
+        self.assertEqual(engine._click_existing_account_email_login.call_count, 2)
+        email.get_code_for_alias.assert_called_once()
+        self.assertEqual(
+            email.get_code_for_alias.call_args.kwargs['provider'],
+            'cloud_mail',
+        )
+
+    @patch('core.register.time.sleep')
+    @patch('core.register.upload_registered_sso', return_value=None)
+    def test_known_existing_account_skips_signup_and_recovers_directly(
+        self, _upload, _sleep,
+    ):
+        engine, db, _email = self._engine()
+        alias = self._alias()
+        alias['existing_account'] = True
+        engine._recover_existing_account_session = Mock(return_value=True)
+        db.find_existing_sso.return_value = None
+
+        engine._do_one_round(
+            alias, 1, 1, self._settings(), 'worker-lease', 'worker-1',
+        )
+
+        engine.browser.page.get.assert_called_once_with(
+            'https://accounts.x.ai/sign-in?redirect=grok-com'
+        )
+        engine._open_signup_page.assert_not_called()
+        engine._fill_email.assert_not_called()
+        engine._recover_existing_account_session.assert_called_once_with(
+            alias, self._settings(),
+        )
+        db.complete_registration_success.assert_called_once()
+
 
 if __name__ == '__main__':
     unittest.main()

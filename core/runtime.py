@@ -7,6 +7,7 @@ logger = logging.getLogger('register')
 
 TRUE_VALUES = {'1', 'true', 'yes', 'on'}
 FALSE_VALUES = {'0', 'false', 'no', 'off'}
+VALID_REGISTRATION_BACKENDS = {'browser', 'protocol', 'auto'}
 
 
 def _environment_bool(name):
@@ -44,3 +45,17 @@ def resolve_registration_concurrency(value):
             )
         concurrency = 1
     return max(1, min(10, concurrency))
+
+
+def resolve_registration_backend(settings):
+    """Resolve the registration transport, defaulting to the legacy browser."""
+    candidate = os.environ.get('GROK_REGISTER_BACKEND')
+    if candidate is None:
+        candidate = (settings or {}).get('registration_backend', 'browser')
+    backend = str(candidate or 'browser').strip().lower()
+    if backend not in VALID_REGISTRATION_BACKENDS:
+        logger.warning(
+            'Ignoring invalid registration backend %r; using browser', candidate,
+        )
+        return 'browser'
+    return backend

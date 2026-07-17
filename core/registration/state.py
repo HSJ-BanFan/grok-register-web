@@ -165,6 +165,14 @@ class RegistrationState:
             self._legacy_current_email = ''
             return self._current_round
 
+    def has_worker_round_capacity(self, max_rounds=0):
+        """Check target capacity before a worker provisions or claims an alias."""
+        with self._lock:
+            return not (
+                max_rounds > 0
+                and self._completed + len(self._active_workers) >= max_rounds
+            )
+
     def set_worker_active(self, worker_id, round_number, alias):
         with self._lock:
             self._active_workers[worker_id] = {

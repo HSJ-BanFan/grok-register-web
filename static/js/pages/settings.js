@@ -1,6 +1,14 @@
 import { api } from '../api.js';
 import { showToast } from '../components/toast.js';
 
+function escapeAttr(value) {
+    return String(value ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('"', '&quot;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;');
+}
+
 export async function render(container) {
     const res = await api('GET', '/api/settings');
     const s = res.success ? res.data : {};
@@ -12,6 +20,120 @@ export async function render(container) {
                 系统设置中心
             </div>
             <div class="form-container-md">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>注册邮箱服务</label>
+                        <select class="form-input" id="s-email-provider">
+                            <option value="microsoft" ${(s.email_provider || 'microsoft') === 'microsoft' ? 'selected' : ''}>Microsoft Outlook / Hotmail（导入账号与别名）</option>
+                            <option value="duckmail" ${s.email_provider === 'duckmail' ? 'selected' : ''}>DuckMail（自动创建临时邮箱）</option>
+                            <option value="yyds" ${s.email_provider === 'yyds' ? 'selected' : ''}>YYDS Mail（自动创建临时邮箱）</option>
+                            <option value="cloudflare" ${s.email_provider === 'cloudflare' ? 'selected' : ''}>Cloudflare Temp Email（自动创建）</option>
+                            <option value="cloud_mail" ${s.email_provider === 'cloud_mail' ? 'selected' : ''}>Cloud Mail API（自动创建）</option>
+                        </select>
+                        <div style="margin-top:6px;font-size:12px;color:var(--text-secondary);">Microsoft 使用账号库中的 OAuth 凭证和加号别名；其他服务会在每轮注册前创建一个独立邮箱并自动入库。</div>
+                    </div>
+                    <div class="form-group" style="visibility:hidden;"></div>
+                </div>
+
+                <div class="mail-provider-settings" data-provider="duckmail">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>DuckMail API Base</label>
+                            <input type="text" class="form-input" id="s-duckmail-api-base" value="${escapeAttr(s.duckmail_api_base || 'https://api.duckmail.sbs')}">
+                        </div>
+                        <div class="form-group">
+                            <label>DuckMail API Key（可选）</label>
+                            <input type="password" class="form-input" id="s-duckmail-api-key" value="${escapeAttr(s.duckmail_api_key || '')}" autocomplete="new-password">
+                        </div>
+                    </div>
+                </div>
+
+                <div class="mail-provider-settings" data-provider="yyds">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>YYDS API Base</label>
+                            <input type="text" class="form-input" id="s-yyds-api-base" value="${escapeAttr(s.yyds_api_base || 'https://maliapi.215.im/v1')}">
+                        </div>
+                        <div class="form-group">
+                            <label>YYDS API Key</label>
+                            <input type="password" class="form-input" id="s-yyds-api-key" value="${escapeAttr(s.yyds_api_key || '')}" autocomplete="new-password">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>YYDS JWT（与 API Key 二选一）</label>
+                            <input type="password" class="form-input" id="s-yyds-jwt" value="${escapeAttr(s.yyds_jwt || '')}" autocomplete="new-password">
+                        </div>
+                        <div class="form-group" style="visibility:hidden;"></div>
+                    </div>
+                </div>
+
+                <div class="mail-provider-settings" data-provider="cloudflare">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Cloudflare 邮箱 API Base</label>
+                            <input type="text" class="form-input" id="s-cloudflare-api-base" value="${escapeAttr(s.cloudflare_api_base || '')}" placeholder="https://temp-mail.example.com">
+                        </div>
+                        <div class="form-group">
+                            <label>鉴权方式</label>
+                            <select class="form-input" id="s-cloudflare-auth-mode">
+                                ${['none', 'query-key', 'bearer', 'x-api-key', 'x-admin-auth'].map(mode => `<option value="${mode}" ${(s.cloudflare_auth_mode || 'none') === mode ? 'selected' : ''}>${mode}</option>`).join('')}
+                            </select>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Cloudflare API Key / Admin Password</label>
+                            <input type="password" class="form-input" id="s-cloudflare-api-key" value="${escapeAttr(s.cloudflare_api_key || '')}" autocomplete="new-password">
+                        </div>
+                        <div class="form-group">
+                            <label>默认域名（逗号分隔，可选）</label>
+                            <input type="text" class="form-input" id="s-cloudflare-default-domains" value="${escapeAttr(s.cloudflare_default_domains || '')}" placeholder="mail.example.com, mail2.example.com">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>域名 / 创建邮箱路径</label>
+                            <div class="input-action-group">
+                                <input type="text" class="form-input" id="s-cloudflare-path-domains" value="${escapeAttr(s.cloudflare_path_domains || '/api/domains')}">
+                                <input type="text" class="form-input" id="s-cloudflare-path-accounts" value="${escapeAttr(s.cloudflare_path_accounts || '/api/new_address')}">
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>Token / 邮件列表路径</label>
+                            <div class="input-action-group">
+                                <input type="text" class="form-input" id="s-cloudflare-path-token" value="${escapeAttr(s.cloudflare_path_token || '/api/token')}">
+                                <input type="text" class="form-input" id="s-cloudflare-path-messages" value="${escapeAttr(s.cloudflare_path_messages || '/api/mails')}">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="mail-provider-settings" data-provider="cloud_mail">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Cloud Mail API Base</label>
+                            <input type="text" class="form-input" id="s-cloud-mail-api-base" value="${escapeAttr(s.cloud_mail_api_base || 'https://mail.meilunaria.dpdns.org')}">
+                        </div>
+                        <div class="form-group">
+                            <label>Cloud Mail API Key（优先）</label>
+                            <input type="password" class="form-input" id="s-cloud-mail-api-key" value="${escapeAttr(s.cloud_mail_api_key || '')}" autocomplete="new-password">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>管理员邮箱（无 API Key 时）</label>
+                            <input type="text" class="form-input" id="s-cloud-mail-admin-email" value="${escapeAttr(s.cloud_mail_admin_email || '')}">
+                        </div>
+                        <div class="form-group">
+                            <label>管理员密码</label>
+                            <input type="password" class="form-input" id="s-cloud-mail-admin-password" value="${escapeAttr(s.cloud_mail_admin_password || '')}" autocomplete="new-password">
+                        </div>
+                    </div>
+                </div>
+
+                <hr style="border: 0; border-top: 1px solid var(--border); margin: 20px 0;" />
+
                 <!-- ── 延时与重试数字设置 ── -->
                 <div class="form-row">
                     <div class="form-group">
@@ -49,6 +171,15 @@ export async function render(container) {
                 <!-- ── 运行与防封模式单选 ── -->
                 <div class="form-row">
                     <div class="form-group">
+                        <label>注册传输后端</label>
+                        <select class="form-input" id="s-registration-backend">
+                            <option value="browser" ${(s.registration_backend || 'browser') === 'browser' ? 'selected' : ''}>浏览器（默认）</option>
+                            <option value="protocol" ${s.registration_backend === 'protocol' ? 'selected' : ''}>HTTP 协议 Worker（实验）</option>
+                            <option value="auto" ${s.registration_backend === 'auto' ? 'selected' : ''}>自动 → 协议（实验）</option>
+                        </select>
+                        <div style="margin-top:6px;font-size:12px;color:var(--text-secondary);">浏览器后端保持现有流程。协议 Worker 优先 curl_cffi 纯 HTTP（发现参数 / gRPC / Server Action / SSO）；Turnstile 优先 YesCaptcha 或本地 solver，失败再回退本机 Chrome。环境被 CF 拦截时不消耗 alias 重试。</div>
+                    </div>
+                    <div class="form-group">
                         <label>浏览器运行模式</label>
                         <div class="radio-group">
                             <label><input type="radio" name="headless" value="true" ${s.browser_headless === 'true' ? 'checked' : ''}> 无头模式（可能被 Cloudflare 拦截）</label>
@@ -69,7 +200,27 @@ export async function render(container) {
                         <label>浏览器代理 (降低 Cloudflare 验证概率)</label>
                         <input type="text" class="form-input" id="s-browser-proxy" value="${s.browser_proxy || ''}" placeholder="http://127.0.0.1:7897 （留空=直连）">
                     </div>
-                    <div class="form-group" style="visibility: hidden;"></div>
+                    <div class="form-group">
+                        <label>协议 Turnstile 提供方</label>
+                        <select class="form-input" id="s-turnstile-provider">
+                            <option value="auto" ${(s.turnstile_provider || 'auto') === 'auto' ? 'selected' : ''}>自动（外置优先，失败可回退浏览器）</option>
+                            <option value="external" ${s.turnstile_provider === 'external' || s.turnstile_provider === 'strict_external' ? 'selected' : ''}>仅外置 / 零浏览器（失败即退出，不启 Chrome）</option>
+                            <option value="browser" ${s.turnstile_provider === 'browser' ? 'selected' : ''}>仅本机浏览器</option>
+                        </select>
+                        <div style="margin-top:6px;font-size:12px;color:var(--text-secondary);">
+                            服务器零浏览器请选「仅外置」并配置 YesCaptcha 或本地 solver；日志会拆分 transport / turnstile / sso_follow。
+                        </div>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>YesCaptcha Key（协议外置打码）</label>
+                        <input type="password" class="form-input" id="s-yescaptcha-key" value="${escapeAttr(s.yescaptcha_key || '')}" placeholder="留空则尝试本地 solver / 浏览器" autocomplete="new-password">
+                    </div>
+                    <div class="form-group">
+                        <label>本地 Turnstile Solver URL</label>
+                        <input type="text" class="form-input" id="s-turnstile-solver-url" value="${escapeAttr(s.turnstile_solver_url || 'http://127.0.0.1:5072')}" placeholder="http://127.0.0.1:5072">
+                    </div>
                 </div>
 
                 <div class="form-row">
@@ -125,7 +276,11 @@ export async function render(container) {
                             <label><input type="radio" name="web-activation" value="false" ${s.grok_web_activation !== 'true' ? 'checked' : ''}> 关闭（推荐，避免每轮 Cloudflare 人机）</label>
                             <label><input type="radio" name="web-activation" value="true" ${s.grok_web_activation === 'true' ? 'checked' : ''}> 开启（可能要手点 Verify you are human）</label>
                         </div>
-                        <div style="margin-top:6px;font-size:12px;color:var(--text-secondary);">关闭不影响 SSO 注册与 grok2api 上传/Build 转换。需要 CF 出口时用「批量补激活」单独处理。</div>
+                        <div style="margin-top:6px;font-size:12px;color:var(--text-secondary);">
+                            仅作用于<strong>浏览器注册</strong>路径：成功拿 SSO 后是否再打开 grok.com 做人机/CF 上下文。
+                            关闭不影响 SSO 落库与 grok2api 上传/Build 转换。
+                            协议路径用 pure-HTTP 做 TOS/生日（与本开关无关）；需要浏览器 CF 出口时仍用「批量补激活」。
+                        </div>
                     </div>
                 </div>
                 <div class="form-row">
@@ -179,6 +334,8 @@ export async function render(container) {
 
     document.getElementById('save-settings-btn').addEventListener('click', saveSettings);
     document.getElementById('reset-settings-btn').addEventListener('click', resetSettings);
+    document.getElementById('s-email-provider').addEventListener('change', updateProviderSettings);
+    updateProviderSettings();
 
     document.querySelectorAll('input[name="password-mode"]').forEach(radio => {
         radio.addEventListener('change', () => {
@@ -188,17 +345,46 @@ export async function render(container) {
     });
 }
 
+function updateProviderSettings() {
+    const provider = document.getElementById('s-email-provider')?.value || 'microsoft';
+    document.querySelectorAll('.mail-provider-settings').forEach(section => {
+        section.style.display = section.dataset.provider === provider ? 'block' : 'none';
+    });
+}
+
 function collectSettings() {
     return {
+        email_provider: document.getElementById('s-email-provider').value,
+        duckmail_api_base: document.getElementById('s-duckmail-api-base').value.trim(),
+        duckmail_api_key: document.getElementById('s-duckmail-api-key').value.trim(),
+        yyds_api_base: document.getElementById('s-yyds-api-base').value.trim(),
+        yyds_api_key: document.getElementById('s-yyds-api-key').value.trim(),
+        yyds_jwt: document.getElementById('s-yyds-jwt').value.trim(),
+        cloudflare_api_base: document.getElementById('s-cloudflare-api-base').value.trim(),
+        cloudflare_api_key: document.getElementById('s-cloudflare-api-key').value.trim(),
+        cloudflare_auth_mode: document.getElementById('s-cloudflare-auth-mode').value,
+        cloudflare_path_domains: document.getElementById('s-cloudflare-path-domains').value.trim(),
+        cloudflare_path_accounts: document.getElementById('s-cloudflare-path-accounts').value.trim(),
+        cloudflare_path_token: document.getElementById('s-cloudflare-path-token').value.trim(),
+        cloudflare_path_messages: document.getElementById('s-cloudflare-path-messages').value.trim(),
+        cloudflare_default_domains: document.getElementById('s-cloudflare-default-domains').value.trim(),
+        cloud_mail_api_base: document.getElementById('s-cloud-mail-api-base').value.trim(),
+        cloud_mail_api_key: document.getElementById('s-cloud-mail-api-key').value.trim(),
+        cloud_mail_admin_email: document.getElementById('s-cloud-mail-admin-email').value.trim(),
+        cloud_mail_admin_password: document.getElementById('s-cloud-mail-admin-password').value,
         max_aliases_per_account: document.getElementById('s-max-aliases').value,
         max_code_retries: document.getElementById('s-code-retries').value,
         registration_timeout: document.getElementById('s-timeout').value,
         max_confirm_retries: document.getElementById('s-confirm-retries').value,
         max_retries_per_alias: document.getElementById('s-alias-retries').value,
         registration_concurrency: document.getElementById('s-registration-concurrency').value,
+        registration_backend: document.getElementById('s-registration-backend').value,
         browser_headless: document.querySelector('input[name="headless"]:checked').value,
         turnstile_auto: document.querySelector('input[name="turnstile"]:checked').value,
         browser_proxy: document.getElementById('s-browser-proxy').value.trim(),
+        turnstile_provider: document.getElementById('s-turnstile-provider').value,
+        yescaptcha_key: document.getElementById('s-yescaptcha-key').value.trim(),
+        turnstile_solver_url: document.getElementById('s-turnstile-solver-url').value.trim(),
         random_name_enabled: document.querySelector('input[name="random-name"]:checked').value,
         extract_numbers_enabled: document.querySelector('input[name="extract-numbers"]:checked').value,
         password_mode: document.querySelector('input[name="password-mode"]:checked').value,

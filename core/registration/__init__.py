@@ -23,6 +23,27 @@ from .signup import (
     classify_signup_page,
     save_signup_diagnostics,
 )
+from .backend import (
+    ProtocolEnvironmentError,
+    ProtocolRegistrationBackend,
+    SignupParameterDiscovery,
+    SignupParameters,
+    apply_sso_cookies,
+    build_protocol_session,
+    build_registration_backend,
+    build_signup_payload,
+    expand_set_cookie_chain,
+    follow_sso_http,
+    redact_sensitive_text,
+    resolve_protocol_proxy,
+)
+from .turnstile import (
+    BrowserTurnstileProvider,
+    ExternalTurnstileProvider,
+    TurnstileSolveError,
+    parse_proxy_for_yescaptcha,
+    resolve_turnstile_settings,
+)
 
 __all__ = [
     'EMAIL_REQUEST_MIN_INTERVAL',
@@ -42,4 +63,21 @@ __all__ = [
     'SignupPageStage',
     'classify_signup_page',
     'save_signup_diagnostics',
+    'ProtocolEnvironmentError',
+    'ProtocolRegistrationBackend',
+    'SignupParameterDiscovery',
+    'SignupParameters',
+    'apply_sso_cookies',
+    'build_protocol_session',
+    'build_registration_backend',
+    'build_signup_payload',
+    'expand_set_cookie_chain',
+    'follow_sso_http',
+    'redact_sensitive_text',
+    'resolve_protocol_proxy',
+    'BrowserTurnstileProvider',
+    'ExternalTurnstileProvider',
+    'TurnstileSolveError',
+    'parse_proxy_for_yescaptcha',
+    'resolve_turnstile_settings',
 ]

@@ -40,7 +40,11 @@ from core.registration.signup import (
     SignupPageStage,
     save_signup_diagnostics,
 )
-from core.runtime import resolve_browser_headless, resolve_registration_concurrency
+from core.runtime import (
+    resolve_browser_headless,
+    resolve_registration_backend,
+    resolve_registration_concurrency,
+)
 
 logger = logging.getLogger('register')
 
@@ -62,6 +66,21 @@ class RegistrationEngine:
     def run(self, max_rounds=0, max_retries=3, concurrency=1):
         self.state.status = 'running'
         settings = self.db.get_settings()
+        backend = resolve_registration_backend(settings)
+        logger.info('Registration backend: %s', backend)
+        if backend in ('protocol', 'auto'):
+            # auto currently maps to protocol; browser remains the safe default.
+            if backend == 'auto':
+                logger.info('Registration backend auto → protocol (experimental)')
+            from core.registration.protocol_worker import ProtocolRegistrationWorker
+            ProtocolRegistrationWorker(
+                self.db, self.browser, self.email_mgr, self.socketio, self.state,
+            ).run(
+                max_rounds=max_rounds,
+                max_retries=max_retries,
+                concurrency=concurrency,
+            )
+            return
         concurrency = resolve_registration_concurrency(concurrency)
         batch_id = secrets.token_hex(6)
         claimed_any = threading.Event()
@@ -137,11 +156,24 @@ class RegistrationEngine:
                 self.state.check_pause()
                 if self.state.should_stop():
                     break
-                alias = self.db.claim_next_alias(
-                    max_retries=max_retries,
-                    lease_owner=lease_owner,
-                    lease_seconds=lease_seconds,
-                )
+                if not self.state.has_worker_round_capacity(max_rounds):
+                    break
+                try:
+                    alias = self.email_mgr.claim_registration_alias(
+                        settings,
+                        max_retries=max_retries,
+                        lease_owner=lease_owner,
+                        lease_seconds=lease_seconds,
+                    )
+                except Exception as exc:
+                    logger.error('[%s] Email provider failed: %s', worker_id, exc)
+                    self._emit_error(
+                        'EMAIL_PROVIDER',
+                        f'[{worker_id}] Email provider failed: {exc}',
+                        fatal=True,
+                    )
+                    self.state.stop()
+                    break
                 if not alias:
                     break
                 claimed_any.set()
@@ -330,41 +362,60 @@ class RegistrationEngine:
         success_committed = False
 
         try:
-            # 1. Open signup page
-            self.state.check_pause()
-            logger.info("Opening registration page...")
-            self._open_signup_page()
+            if alias.get('existing_account'):
+                # A previous round already proved this mailbox belongs to an
+                # xAI account. Go straight to sign-in so recovery does not burn
+                # another signup verification-code request first.
+                self.state.check_pause()
+                signin_url = 'https://accounts.x.ai/sign-in?redirect=grok-com'
+                logger.info(
+                    'Recovering known existing account directly through %s',
+                    signin_url,
+                )
+                self.browser.page.get(signin_url)
+                time.sleep(2)
+                if not self._recover_existing_account_session(alias, settings):
+                    raise Exception(
+                        'Existing-account email login did not return an SSO session'
+                    )
+            else:
+                # 1. Open signup page
+                self.state.check_pause()
+                logger.info("Opening registration page...")
+                self._open_signup_page()
 
-            # 2. Fill email
-            self.state.check_pause()
-            logger.info(f"Filling email: {alias_email}")
-            verification_requested_at = self._fill_email(alias_email)
+                # 2. Fill email
+                self.state.check_pause()
+                logger.info(f"Filling email: {alias_email}")
+                verification_requested_at = self._fill_email(alias_email)
 
-            # 3. Get verification code
-            self.state.check_pause()
-            logger.info("Requesting verification code...")
-            code = self.email_mgr.get_code_for_alias(
-                alias_email, alias['account_id'],
-                alias['client_id'], alias['refresh_token'],
-                max_retries=max(
-                    MIN_VERIFICATION_CODE_POLLS,
-                    int(settings.get('max_code_retries', 3) or 3),
-                ),
-                main_email=alias.get('main_email'),
-                requested_after=verification_requested_at,
-            )
+                # 3. Get verification code
+                self.state.check_pause()
+                logger.info("Requesting verification code...")
+                code = self.email_mgr.get_code_for_alias(
+                    alias_email, alias['account_id'],
+                    alias['client_id'], alias['refresh_token'],
+                    max_retries=max(
+                        MIN_VERIFICATION_CODE_POLLS,
+                        int(settings.get('max_code_retries', 3) or 3),
+                    ),
+                    main_email=alias.get('main_email'),
+                    requested_after=verification_requested_at,
+                    provider=alias.get('provider', 'microsoft'),
+                    settings=settings,
+                )
 
-            # 4. Fill code and confirm
-            self.state.check_pause()
-            logger.info(f"Filling verification code: {code}")
-            self._fill_and_confirm_code(code)
+                # 4. Fill code and confirm
+                self.state.check_pause()
+                logger.info(f"Filling verification code: {code}")
+                self._fill_and_confirm_code(code)
 
-            # 5. Fill profile
-            self.state.check_pause()
-            logger.info("Filling profile information...")
-            self._fill_profile(
-                password, settings, alias_email=alias_email, alias=alias,
-            )
+                # 5. Fill profile
+                self.state.check_pause()
+                logger.info("Filling profile information...")
+                self._fill_profile(
+                    password, settings, alias_email=alias_email, alias=alias,
+                )
 
             # 6. Extract SSO (turnstile is handled inside _fill_profile)
             logger.info("Extracting SSO token...")
@@ -790,7 +841,20 @@ return {
             try:
                 # If email field is already visible, no entry button is needed.
                 already = self.browser.run_js(r"""
-return !!document.querySelector('input[type="email"], input[name="email"], input[autocomplete="email"]');
+function isVisible(node) {
+  if (!node) return false;
+  const style = window.getComputedStyle(node);
+  if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+  const rect = node.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0;
+}
+const body = String(document.body?.innerText || '').replace(/\s+/g, ' ').trim().toLowerCase();
+const existingNotice = body.includes('existing account found')
+  || body.includes('an account already exists which is associated with this email address');
+if (existingNotice) return false;
+return Array.from(document.querySelectorAll(
+  'input[type="email"], input[name="email"], input[autocomplete="email"]'
+)).some(isVisible);
                 """)
                 if already:
                     logger.info('Email input already visible; skipping email signup button')
@@ -1981,7 +2045,26 @@ return '';
                 'Existing account found for %s; attempting email-login recovery',
                 alias_email,
             )
-            self._click_existing_account_email_login()
+            try:
+                self._click_existing_account_email_login(timeout=5)
+                time.sleep(1)
+            except Exception as exc:
+                logger.info(
+                    'Existing-account page has no usable login control; '
+                    'opening the sign-in route directly: %s',
+                    exc,
+                )
+
+            if self._detect_existing_account_notice():
+                signin_url = 'https://accounts.x.ai/sign-in?redirect=grok-com'
+                logger.info(
+                    'Existing-account page did not enter login mode; opening %s',
+                    signin_url,
+                )
+                self.browser.page.get(signin_url)
+                time.sleep(2)
+                self._dismiss_cookie_banner()
+                self._click_existing_account_email_login(timeout=15)
             requested_at = self._fill_email(alias_email)
             logger.info('Requesting existing-account login verification code...')
             code = self.email_mgr.get_code_for_alias(
@@ -1995,6 +2078,8 @@ return '';
                 ),
                 main_email=alias.get('main_email'),
                 requested_after=requested_at,
+                provider=alias.get('provider', 'microsoft'),
+                settings=settings,
             )
             logger.info('Filling existing-account login verification code: %s', code)
             self._fill_and_confirm_code(code)

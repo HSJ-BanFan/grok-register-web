@@ -13,6 +13,10 @@ MAIL_FETCH_ERROR_MARKERS = (
     'outlook rest mail failed',
     'imap ',
     'mail.tm',
+    'duckmail',
+    'yyds',
+    'cloudflare mail',
+    'cloud mail',
 )
 
 

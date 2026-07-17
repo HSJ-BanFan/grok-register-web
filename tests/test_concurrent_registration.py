@@ -352,14 +352,15 @@ class RegistrationCoordinatorTest(unittest.TestCase):
             'browser_proxy': '',
             'registration_timeout': '300',
         }
-        db.claim_next_alias.return_value = None
+        email_mgr = Mock()
+        email_mgr.claim_registration_alias.return_value = None
         browser_template = Mock()
         browsers = [Mock(), Mock(), Mock()]
         browser_template.clone.side_effect = browsers
         socketio = Mock()
         state = RegistrationState()
         engine = RegistrationEngine(
-            db, browser_template, Mock(), socketio, state,
+            db, browser_template, email_mgr, socketio, state,
         )
 
         engine.run(max_rounds=0, max_retries=3, concurrency=3)
