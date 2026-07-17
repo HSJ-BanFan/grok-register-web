@@ -2163,7 +2163,7 @@ code {
     transform-origin: top center;
     animation: ui-select-in var(--dur-base) var(--ease-spring) both;
 }
-.ui-select.is-drop-up .ui-select-menu {
+.ui-select-menu.is-drop-up {
     transform-origin: bottom center;
     animation-name: ui-select-in-up;
 }
@@ -2185,7 +2185,7 @@ code {
         color var(--dur-fast) var(--ease-out),
         transform var(--dur-fast) var(--ease-out);
 }
-.ui-select.is-mono .ui-select-option-label {
+.ui-select-menu.is-mono .ui-select-option-label {
     font-family: var(--font-mono);
     font-size: 12.5px;
 }

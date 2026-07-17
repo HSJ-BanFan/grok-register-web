@@ -7,6 +7,9 @@ const CHEVRON = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" str
 
 const CHECK = `<svg class="ui-select-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>`;
 
+const ownedMenus = new WeakMap();
+const menuOwners = new WeakMap();
+
 function prefersReducedMotion() {
     return typeof matchMedia === 'function'
         && matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -28,11 +31,31 @@ function clearMenuPosition(menu) {
     menu.style.maxHeight = '';
 }
 
+function getMenu(wrap) {
+    return ownedMenus.get(wrap) || wrap?.querySelector('.ui-select-menu') || null;
+}
+
+function portalMenu(wrap, menu) {
+    if (!wrap || !menu) return;
+    ownedMenus.set(wrap, menu);
+    menuOwners.set(menu, wrap);
+    menu.classList.toggle('is-mono', wrap.classList.contains('is-mono'));
+    menu.classList.toggle('is-reduced', wrap.classList.contains('is-reduced'));
+    document.body.appendChild(menu);
+}
+
+function restoreMenu(wrap, menu) {
+    if (!menu) return;
+    menu.classList.remove('is-drop-up', 'is-mono', 'is-reduced');
+    if (wrap?.isConnected) wrap.appendChild(menu);
+    else menu.remove();
+}
+
 function closeSelect(wrap) {
     if (!wrap) return;
     wrap.classList.remove('is-open', 'is-drop-up');
     const trigger = wrap.querySelector('.ui-select-trigger');
-    const menu = wrap.querySelector('.ui-select-menu');
+    const menu = getMenu(wrap);
     if (trigger) trigger.setAttribute('aria-expanded', 'false');
     if (menu) {
         menu.hidden = true;
@@ -40,6 +63,7 @@ function closeSelect(wrap) {
         menu.querySelectorAll('.ui-select-option.is-active').forEach((el) => {
             el.classList.remove('is-active');
         });
+        restoreMenu(wrap, menu);
     }
 }
 
@@ -47,13 +71,14 @@ function openSelect(wrap) {
     if (!wrap || wrap.classList.contains('is-disabled')) return;
     closeAll(wrap);
     const trigger = wrap.querySelector('.ui-select-trigger');
-    const menu = wrap.querySelector('.ui-select-menu');
+    const menu = getMenu(wrap);
     const select = wrap.querySelector('select');
     if (!trigger || !menu) return;
 
     wrap.classList.add('is-open');
     trigger.setAttribute('aria-expanded', 'true');
     menu.hidden = false;
+    portalMenu(wrap, menu);
 
     // Align active highlight with current value
     const current = select?.value ?? '';
@@ -64,6 +89,8 @@ function openSelect(wrap) {
         opt.setAttribute('aria-selected', selected ? 'true' : 'false');
         if (selected) active = opt;
     });
+    positionMenu(wrap);
+
     if (active) {
         active.classList.add('is-active');
         // scroll into view without jumping the page
@@ -74,11 +101,10 @@ function openSelect(wrap) {
         }
     }
 
-    positionMenu(wrap);
 }
 
 function positionMenu(wrap) {
-    const menu = wrap.querySelector('.ui-select-menu');
+    const menu = getMenu(wrap);
     const trigger = wrap.querySelector('.ui-select-trigger');
     if (!menu || !trigger) return;
 
@@ -108,12 +134,14 @@ function positionMenu(wrap) {
 
     if (openUp) {
         wrap.classList.add('is-drop-up');
+        menu.classList.add('is-drop-up');
         const maxH = Math.max(120, Math.min(280, spaceAbove));
         menu.style.maxHeight = `${maxH}px`;
         const height = Math.min(natural, maxH);
         menu.style.top = `${Math.max(gutter, rect.top - height - 6)}px`;
     } else {
         wrap.classList.remove('is-drop-up');
+        menu.classList.remove('is-drop-up');
         const maxH = Math.max(120, Math.min(280, spaceBelow));
         menu.style.maxHeight = `${maxH}px`;
         menu.style.top = `${rect.bottom + 6}px`;
@@ -123,7 +151,7 @@ function positionMenu(wrap) {
 function setValue(wrap, value, { emit = true } = {}) {
     const select = wrap.querySelector('select');
     const triggerValue = wrap.querySelector('.ui-select-value');
-    const menu = wrap.querySelector('.ui-select-menu');
+    const menu = getMenu(wrap);
     if (!select) return;
 
     const next = String(value ?? '');
@@ -147,7 +175,7 @@ function setValue(wrap, value, { emit = true } = {}) {
 }
 
 function moveActive(wrap, delta) {
-    const menu = wrap.querySelector('.ui-select-menu');
+    const menu = getMenu(wrap);
     if (!menu) return;
     const options = Array.from(menu.querySelectorAll('.ui-select-option'));
     if (!options.length) return;
@@ -175,6 +203,9 @@ function bindSelect(wrap) {
     const trigger = wrap.querySelector('.ui-select-trigger');
     const menu = wrap.querySelector('.ui-select-menu');
     if (!select || !trigger || !menu) return;
+
+    ownedMenus.set(wrap, menu);
+    menuOwners.set(menu, wrap);
 
     // Sync label if native value changed programmatically
     select.addEventListener('change', () => {
@@ -264,6 +295,8 @@ function ensureGlobalHandlers() {
 
     document.addEventListener('click', (event) => {
         if (event.target.closest?.('.ui-select')) return;
+        const menu = event.target.closest?.('.ui-select-menu');
+        if (menu && menuOwners.has(menu)) return;
         closeAll();
     });
 
@@ -274,6 +307,8 @@ function ensureGlobalHandlers() {
     window.addEventListener('resize', () => {
         document.querySelectorAll('.ui-select.is-open').forEach(positionMenu);
     });
+
+    window.addEventListener('hashchange', () => closeAll());
 
     // Reposition while scrolling; close only if the trigger leaves the viewport.
     window.addEventListener('scroll', (event) => {
