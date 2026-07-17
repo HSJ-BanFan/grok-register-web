@@ -12,54 +12,178 @@ const routes = {
     '#/settings': SettingsPage,
 };
 
-function navigate() {
-    const hash = location.hash || '#/email';
-    const page = routes[hash] || routes['#/email'];
-    const mainContent = document.getElementById('main-content');
-    if (mainContent && page) {
-        page.render(mainContent);
+const PAGE_META = {
+    '#/email': { title: '邮箱', eyebrow: 'Account Intake' },
+    '#/register': { title: '注册', eyebrow: 'Task Console' },
+    '#/results': { title: '结果', eyebrow: 'SSO & Stats' },
+    '#/settings': { title: '设置', eyebrow: 'System Config' },
+};
+
+const prefersReducedMotion = () =>
+    typeof window !== 'undefined'
+    && window.matchMedia
+    && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+let currentHash = '';
+let navToken = 0;
+
+function clearPageMotion(el) {
+    if (!el) return;
+    el.classList.remove('is-page-exit', 'is-page-hold', 'is-page-enter');
+}
+
+function waitAnimation(el, fallbackMs = 280) {
+    return new Promise((resolve) => {
+        if (!el || prefersReducedMotion()) {
+            resolve();
+            return;
+        }
+        let done = false;
+        const finish = () => {
+            if (done) return;
+            done = true;
+            el.removeEventListener('animationend', onEnd);
+            resolve();
+        };
+        const onEnd = (event) => {
+            if (event.target === el) finish();
+        };
+        el.addEventListener('animationend', onEnd);
+        window.setTimeout(finish, fallbackMs);
+    });
+}
+
+function updatePageChrome(hash) {
+    const meta = PAGE_META[hash] || PAGE_META['#/email'];
+    const titleEl = document.getElementById('page-title');
+    const eyebrowEl = document.getElementById('page-eyebrow');
+    document.title = `${meta.title} · Grok 自动注册工具`;
+    if (titleEl) {
+        titleEl.classList.remove('is-swapping');
+        titleEl.textContent = meta.title;
+    }
+    if (eyebrowEl) {
+        eyebrowEl.classList.remove('is-swapping');
+        eyebrowEl.textContent = meta.eyebrow;
     }
 }
 
+async function mountPage(hash, mainContent, { animateEnter = true } = {}) {
+    const page = routes[hash] || routes['#/email'];
+    const resolved = routes[hash] ? hash : '#/email';
+    updatePageChrome(resolved);
+
+    // Keep the shell fully transparent while swapping DOM so the new
+    // page never paints at opacity:1 before the enter animation starts.
+    mainContent.classList.remove('is-page-exit', 'is-page-enter');
+    if (animateEnter && !prefersReducedMotion()) {
+        mainContent.classList.add('is-page-hold');
+    } else {
+        mainContent.classList.remove('is-page-hold');
+    }
+
+    await page.render(mainContent);
+
+    if (animateEnter && !prefersReducedMotion()) {
+        // hold → enter in one frame: reflow then swap classes
+        void mainContent.offsetWidth;
+        mainContent.classList.remove('is-page-hold');
+        mainContent.classList.add('is-page-enter');
+        await waitAnimation(mainContent, 340);
+        mainContent.classList.remove('is-page-enter');
+    }
+}
+
+async function navigate() {
+    const hash = location.hash || '#/email';
+    const mainContent = document.getElementById('main-content');
+    if (!mainContent) return;
+
+    const token = ++navToken;
+    const reduced = prefersReducedMotion();
+
+    // First paint or reduced motion: mount without exit/enter flash path
+    if (!currentHash || reduced) {
+        try {
+            clearPageMotion(mainContent);
+            await mountPage(hash, mainContent, { animateEnter: Boolean(currentHash) && !reduced });
+            if (token === navToken) currentHash = hash;
+        } catch (err) {
+            console.error('navigate failed', err);
+        }
+        return;
+    }
+
+    if (hash === currentHash && mainContent.childElementCount) return;
+
+    try {
+        // 1) Fade old page out and stay at opacity 0 (fill-mode: forwards + hold class)
+        mainContent.classList.remove('is-page-enter', 'is-page-hold');
+        mainContent.classList.add('is-page-exit');
+        await waitAnimation(mainContent, 240);
+        if (token !== navToken) return;
+
+        // 2) Lock transparent before removing exit (prevents opacity snap-back flash)
+        mainContent.classList.add('is-page-hold');
+        mainContent.classList.remove('is-page-exit');
+
+        // 3) Replace DOM while invisible, then enter
+        await mountPage(hash, mainContent, { animateEnter: true });
+        if (token === navToken) currentHash = hash;
+    } catch (err) {
+        console.error('navigate failed', err);
+        clearPageMotion(mainContent);
+    }
+}
+
+function initMobileNav() {
+    const menuBtn = document.getElementById('mobile-menu');
+    const scrim = document.getElementById('sidebar-scrim');
+    if (!menuBtn || !scrim) return;
+
+    const close = () => document.body.classList.remove('sidebar-open');
+    const toggle = () => document.body.classList.toggle('sidebar-open');
+
+    menuBtn.addEventListener('click', toggle);
+    scrim.addEventListener('click', close);
+    window.addEventListener('hashchange', close);
+    window.addEventListener('resize', () => {
+        if (window.innerWidth > 960) close();
+    });
+}
+
 function init() {
-    // Render sidebar
     const sidebar = document.getElementById('sidebar');
     if (sidebar) {
         renderSidebar(sidebar);
     }
 
-    // Set default hash
     if (!location.hash) {
         location.hash = '#/email';
     }
 
-    // Theme toggle
     const toggleBtn = document.getElementById('theme-toggle');
     if (toggleBtn) {
         toggleBtn.addEventListener('click', () => {
             const isDark = document.documentElement.classList.toggle('dark-theme');
-            localStorage.setItem('theme', isDark ? 'dark' : 'light');
+            const theme = isDark ? 'dark' : 'light';
+            localStorage.setItem('theme', theme);
+            document.documentElement.dataset.theme = theme;
         });
     }
 
-    // Listen for hash changes
-    window.addEventListener('hashchange', navigate);
-
-    // Initial render
+    initMobileNav();
+    window.addEventListener('hashchange', () => {
+        navigate();
+    });
     navigate();
 
-    // Connect WebSocket (global, for log/status updates)
     connectSocket({
-        onLog: (data) => {
-            // Logs are handled by register page's log panel when active
-        },
-        onStatusUpdate: (data) => {
-            // Status updates are handled by register page when active
-        },
+        onLog: () => {},
+        onStatusUpdate: () => {},
     });
 }
 
-// Start when DOM is ready
 if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);
 } else {

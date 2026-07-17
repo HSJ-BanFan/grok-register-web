@@ -11,8 +11,9 @@ class StaticSecurityTest(unittest.TestCase):
 
         for sink in ('innerHTML', 'outerHTML', 'insertAdjacentHTML', 'document.write'):
             self.assertNotIn(sink, source)
+        self.assertIn('new DOMParser()', source)
         self.assertIn('container.replaceChildren', source)
-        self.assertIn('applySettingsToForm(container, s)', source)
+        self.assertIn('function esc(value)', source)
 
 
 if __name__ == '__main__':

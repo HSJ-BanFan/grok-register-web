@@ -55,6 +55,7 @@ export function createTable(container, options) {
         const tbody = document.createElement('tbody');
         data.forEach((row, idx) => {
             const tr = document.createElement('tr');
+            tr.style.setProperty('--row-i', String(idx));
             if (selectable && row.id !== undefined) {
                 const td = document.createElement('td');
                 const checkbox = document.createElement('input');

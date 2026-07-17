@@ -1,6 +1,8 @@
 import { api } from '../api.js';
 import { showToast } from '../components/toast.js';
 import { createTable } from '../components/table.js';
+import { animateCountNodes } from '../components/count-up.js';
+import { FOLD_CHEVRON, initFoldCards, updateFoldCount } from '../components/fold.js';
 
 let ssoTable = null;
 let accTable = null;
@@ -16,72 +18,117 @@ const ICONS = {
     sso: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>`,
     today: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>`,
     rate: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>`,
-    duration: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>`
+    duration: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>`,
 };
+
+
+function metric(icon, value, label, tone = 'accent', valueClass = '') {
+    const toneMap = {
+        accent: 'var(--accent)',
+        success: 'var(--success)',
+        info: 'var(--info)',
+        error: 'var(--error)',
+        warning: 'var(--warning)',
+        muted: 'var(--text-secondary)',
+    };
+    const color = toneMap[tone] || toneMap.accent;
+    const valCls = valueClass ? ` ${valueClass}` : '';
+    const display = value == null ? '0' : String(value);
+    return `
+        <div class="stat-card" style="--card-accent: ${color};">
+            <span class="stat-icon" style="color:${color};">${icon}</span>
+            <div class="stat-value count-up${valCls}" style="color:${color};" data-count-value="${display.replace(/"/g, '&quot;')}">0</div>
+            <div class="stat-label">${label}</div>
+        </div>
+    `;
+}
 
 export async function render(container) {
     container.innerHTML = `
         <div class="card">
             <div class="card-title">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></svg>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></svg>
                 系统统计概览
             </div>
             <div class="stats-grid" id="stats-grid"></div>
         </div>
 
-        <div class="card">
-            <div class="card-title" style="display:flex;justify-content:space-between;align-items:center;">
-                <span style="display:flex;align-items:center;gap:8px;">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-                    SSO 会话令牌 (已成功注册)
-                </span>
-                <div class="btn-group">
+        <div class="card fold-card" data-fold="sso" id="fold-sso">
+            <div class="card-header">
+                <button type="button" class="fold-toggle" id="fold-sso-toggle" aria-expanded="false" aria-controls="fold-sso-body">
+                    <span class="fold-chevron" aria-hidden="true">${FOLD_CHEVRON}</span>
+                    <div class="card-title">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                        SSO 会话令牌 (已成功注册)
+                    </div>
+                    <span class="fold-meta">
+                        <span class="fold-count" id="sso-count">0</span>
+                        <span class="fold-hint">点击展开</span>
+                    </span>
+                </button>
+                <div class="btn-group actions-tight fold-actions">
                     <button class="btn btn-sm btn-success" id="sso-reactivate-btn" title="对历史成功账号逐个补做 TOS/生日/Cloudflare 激活">
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
                         批量补激活
                     </button>
                     <button class="btn btn-sm btn-secondary" id="sso-copy-btn">
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                         全选复制
                     </button>
                     <button class="btn btn-sm btn-primary" id="sso-export-btn">
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
                         导出为文本
                     </button>
                     <button class="btn btn-sm btn-danger" id="sso-clear-btn">
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
                         清空记录
                     </button>
                 </div>
             </div>
-            <div id="sso-table"></div>
+            <div class="fold-body" id="fold-sso-body" role="region" aria-labelledby="fold-sso-toggle">
+                <div class="fold-body-inner">
+                    <div class="fold-scroll" id="sso-table"></div>
+                </div>
+            </div>
         </div>
 
-        <div class="card">
-            <div class="card-title" style="display:flex;justify-content:space-between;align-items:center;">
-                <span style="display:flex;align-items:center;gap:8px;">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-                    已成功注册 Grok 的别名邮箱账号
-                </span>
-                <div class="btn-group">
+        <div class="card fold-card" data-fold="accounts" id="fold-accounts">
+            <div class="card-header">
+                <button type="button" class="fold-toggle" id="fold-acc-toggle" aria-expanded="false" aria-controls="fold-acc-body">
+                    <span class="fold-chevron" aria-hidden="true">${FOLD_CHEVRON}</span>
+                    <div class="card-title">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                        已成功注册 Grok 的别名邮箱账号
+                    </div>
+                    <span class="fold-meta">
+                        <span class="fold-count" id="acc-count">0</span>
+                        <span class="fold-hint">点击展开</span>
+                    </span>
+                </button>
+                <div class="btn-group actions-tight fold-actions">
                     <button class="btn btn-sm btn-secondary" id="acc-copy-btn">
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                         全选复制
                     </button>
                     <button class="btn btn-sm btn-primary" id="acc-export-btn">
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
                         导出为文本
                     </button>
                     <button class="btn btn-sm btn-danger" id="acc-clear-btn">
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
                         清空记录
                     </button>
                 </div>
             </div>
-            <div id="acc-table"></div>
+            <div class="fold-body" id="fold-acc-body" role="region" aria-labelledby="fold-acc-toggle">
+                <div class="fold-body-inner">
+                    <div class="fold-scroll" id="acc-table"></div>
+                </div>
+            </div>
         </div>
     `;
 
+    initFoldCards(container);
     await Promise.all([loadStats(), loadSSO(), loadAccounts()]);
 
     document.getElementById('sso-reactivate-btn').addEventListener('click', startBatchReactivate);
@@ -130,105 +177,58 @@ async function loadStats() {
     const grid = document.getElementById('stats-grid');
     if (!grid || !res.success) return;
     const s = res.data;
-    grid.innerHTML = `
-        <div class="stat-card" style="--card-accent: var(--accent);">
-            <span style="color:var(--accent);opacity:0.85;">${ICONS.accounts}</span>
-            <div class="stat-value">${s.total_accounts}</div>
-            <div class="stat-label">主账号总数</div>
-        </div>
-        <div class="stat-card" style="--card-accent: var(--success);">
-            <span style="color:var(--success);opacity:0.85;">${ICONS.used}</span>
-            <div class="stat-value" style="color:var(--success);">${s.used_accounts}</div>
-            <div class="stat-label">已使用主账号</div>
-        </div>
-        <div class="stat-card" style="--card-accent: var(--info);">
-            <span style="color:var(--info);opacity:0.85;">${ICONS.unused}</span>
-            <div class="stat-value" style="color:var(--info);">${s.unused_accounts}</div>
-            <div class="stat-label">未使用主账号</div>
-        </div>
-        <div class="stat-card" style="--card-accent: var(--text-secondary);">
-            <span style="color:var(--text-secondary);opacity:0.85;">${ICONS.done}</span>
-            <div class="stat-value" style="color:var(--text-secondary);">${s.done_accounts}</div>
-            <div class="stat-label">额度已用完账号</div>
-        </div>
-        <div class="stat-card" style="--card-accent: var(--accent);">
-            <span style="color:var(--accent);opacity:0.85;">${ICONS.aliases}</span>
-            <div class="stat-value">${s.total_aliases}</div>
-            <div class="stat-label">系统别名总数</div>
-        </div>
-        <div class="stat-card" style="--card-accent: var(--success);">
-            <span style="color:var(--success);opacity:0.85;">${ICONS.used}</span>
-            <div class="stat-value" style="color:var(--success);">${s.used_aliases}</div>
-            <div class="stat-label">已使用别名数</div>
-        </div>
-        <div class="stat-card" style="--card-accent: var(--info);">
-            <span style="color:var(--info);opacity:0.85;">${ICONS.ready}</span>
-            <div class="stat-value" style="color:var(--info);">${s.ready_aliases}</div>
-            <div class="stat-label">待分配别名数</div>
-        </div>
-        <div class="stat-card" style="--card-accent: var(--error);">
-            <span style="color:var(--error);opacity:0.85;">${ICONS.failed}</span>
-            <div class="stat-value" style="color:var(--error);">${s.failed_aliases}</div>
-            <div class="stat-label">失败别名数</div>
-        </div>
-        <div class="stat-card" style="--card-accent: var(--accent);">
-            <span style="color:var(--accent);opacity:0.85;">${ICONS.sso}</span>
-            <div class="stat-value">${s.total_sso}</div>
-            <div class="stat-label">成功采集 SSO 数</div>
-        </div>
-        <div class="stat-card" style="--card-accent: var(--info);">
-            <span style="color:var(--info);opacity:0.85;">${ICONS.today}</span>
-            <div class="stat-value" style="color:var(--info);">${s.today_sso}</div>
-            <div class="stat-label">今日采集 SSO 数</div>
-        </div>
-        <div class="stat-card" style="--card-accent: var(--success);">
-            <span style="color:var(--success);opacity:0.9;">${ICONS.rate}</span>
-            <div class="stat-value" style="color:var(--success);">${s.success_rate}%</div>
-            <div class="stat-label">别名注册成功率</div>
-        </div>
-        <div class="stat-card" style="--card-accent: var(--warning);">
-            <span style="color:var(--warning);opacity:0.85;">${ICONS.duration}</span>
-            <div class="stat-value" style="color:var(--warning);">${s.avg_duration}s</div>
-            <div class="stat-label">平均注册耗时</div>
-        </div>
-    `;
+    grid.innerHTML = [
+        metric(ICONS.accounts, s.total_accounts, '主账号总数', 'accent'),
+        metric(ICONS.used, s.used_accounts, '已使用主账号', 'success'),
+        metric(ICONS.unused, s.unused_accounts, '未使用主账号', 'info'),
+        metric(ICONS.done, s.done_accounts, '额度已用完账号', 'muted'),
+        metric(ICONS.aliases, s.total_aliases, '系统别名总数', 'accent'),
+        metric(ICONS.used, s.used_aliases, '已使用别名数', 'success'),
+        metric(ICONS.ready, s.ready_aliases, '待分配别名数', 'info'),
+        metric(ICONS.failed, s.failed_aliases, '失败别名数', 'error'),
+        metric(ICONS.sso, s.total_sso, '成功采集 SSO 数', 'accent'),
+        metric(ICONS.today, s.today_sso, '今日采集 SSO 数', 'info'),
+        metric(ICONS.rate, `${s.success_rate}%`, '别名注册成功率', 'success'),
+        metric(ICONS.duration, `${s.avg_duration}s`, '平均注册耗时', 'warning'),
+    ].join('');
+    animateCountNodes(grid, { duration: 920, stagger: 40 });
 }
 
 async function loadSSO() {
     const res = await api('GET', '/api/results/sso');
     const el = document.getElementById('sso-table');
     if (!el) return;
+    const rows = res.data || [];
+    updateFoldCount('sso-count', rows.length);
     ssoTable = createTable(el, {
         columns: [
             { title: '#', width: '50px', render: (r, i) => `${i + 1}` },
-            { title: '注册别名邮箱', key: 'email', render: (r) => `<span style="font-weight:500;">${r.email}</span>` },
+            { title: '注册别名邮箱', key: 'email', render: (r) => `<span class="font-medium">${r.email}</span>` },
             { title: 'SSO Session Token', render: (r) => {
                 const sso = r.sso_value || '';
                 const container = document.createElement('div');
-                container.style.display = 'flex';
-                container.style.alignItems = 'center';
-                container.style.gap = '8px';
-                
+                container.className = 'sso-cell';
+
                 const span = document.createElement('span');
                 span.className = 'sso-text';
                 span.textContent = sso.substring(0, 36) + '...';
                 span.title = sso;
-                
+
                 const btn = document.createElement('button');
                 btn.className = 'copy-btn';
-                btn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
+                btn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
                 btn.addEventListener('click', () => {
                     navigator.clipboard.writeText(sso);
                     showToast('SSO 令牌已复制到剪切板', 'success');
                 });
-                
+
                 container.appendChild(span);
                 container.appendChild(btn);
                 return container;
             }},
-            { title: '采集时间', key: 'created_at', width: '150px', render: (r) => r.created_at ? `<span style="color:var(--text-secondary);font-size:12.5px;">${r.created_at.substring(0, 16)}</span>` : '' },
+            { title: '采集时间', key: 'created_at', width: '150px', render: (r) => r.created_at ? `<span class="time-cell">${r.created_at.substring(0, 16)}</span>` : '' },
         ],
-        data: res.data || [],
+        data: rows,
         emptyText: '暂无已采收的 SSO Token 记录',
     });
 }
@@ -237,14 +237,16 @@ async function loadAccounts() {
     const res = await api('GET', '/api/results/accounts');
     const el = document.getElementById('acc-table');
     if (!el) return;
+    const rows = res.data || [];
+    updateFoldCount('acc-count', rows.length);
     accTable = createTable(el, {
         columns: [
             { title: '#', width: '50px', render: (r, i) => `${i + 1}` },
-            { title: '注册别名邮箱账号', key: 'email', render: (r) => `<span style="font-weight:500;">${r.email}</span>` },
-            { title: '登录密码', key: 'account_password', render: (r) => `<span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;">${r.account_password}</span>` },
-            { title: '完成时间', key: 'created_at', width: '150px', render: (r) => r.created_at ? `<span style="color:var(--text-secondary);font-size:12.5px;">${r.created_at.substring(0, 16)}</span>` : '' },
+            { title: '注册别名邮箱账号', key: 'email', render: (r) => `<span class="font-medium">${r.email}</span>` },
+            { title: '登录密码', key: 'account_password', render: (r) => `<span class="mono">${r.account_password}</span>` },
+            { title: '完成时间', key: 'created_at', width: '150px', render: (r) => r.created_at ? `<span class="time-cell">${r.created_at.substring(0, 16)}</span>` : '' },
         ],
-        data: res.data || [],
+        data: rows,
         emptyText: '暂无已成功完成注册的邮箱别名记录',
     });
 }

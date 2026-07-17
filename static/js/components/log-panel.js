@@ -43,10 +43,11 @@ export function createLogPanel(container) {
     function addLog(entry) {
         logs.push(entry);
         const line = document.createElement('div');
-        line.className = `log-line log-${entry.level || 'info'}`;
+        line.className = `log-line log-${entry.level || 'info'} is-new`;
         const time = entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString() : new Date().toLocaleTimeString();
         line.textContent = `[${time}] ${entry.message}`;
         logBody.appendChild(line);
+        window.setTimeout(() => line.classList.remove('is-new'), 320);
 
         if (!locked) {
             logBody.scrollTop = logBody.scrollHeight;

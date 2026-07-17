@@ -2,6 +2,7 @@ import { api } from '../api.js';
 import { showToast } from '../components/toast.js';
 import { createLogPanel } from '../components/log-panel.js';
 import { connectSocket } from '../websocket.js';
+import { countUp } from '../components/count-up.js';
 
 let logPanel = null;
 
@@ -9,45 +10,43 @@ export async function render(container) {
     container.innerHTML = `
         <div class="card">
             <div class="card-title">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
                 注册任务控制台
             </div>
-            
+            <p class="card-desc">启动 / 暂停 / 停止注册 Worker，并实时查看当前轮次与活跃账号。</p>
 
-            
-            <div class="btn-group" style="margin: 20px 0 24px 0;">
+            <div class="btn-group control-actions">
                 <button class="btn btn-success" id="start-btn">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><polygon points="5 3 19 12 5 21 5 3"/></svg>
                     启动注册任务
                 </button>
                 <button class="btn btn-primary" id="reactivate-btn" title="对历史成功账号补做 TOS/生日/Cloudflare 激活">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
                     批量补激活旧账号
                 </button>
                 <button class="btn btn-warning" id="pause-btn" disabled>
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
                     暂停
                 </button>
                 <button class="btn btn-danger" id="stop-btn" disabled>
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
                     停止任务
                 </button>
             </div>
-            
-            <!-- Sleek Dashboard Status Grid -->
+
             <div id="reg-status">
-                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px;">
-                    <span style="font-size:13.5px;color:var(--text-secondary);font-weight:600;">注册任务状态仪表盘</span>
+                <div class="dashboard-head">
+                    <span class="dashboard-head-title">注册任务状态仪表盘</span>
                     <span class="badge badge-stopped">已停止</span>
                 </div>
                 <div class="mini-stats-grid">
                     <div class="mini-stat-card">
                         <span class="mini-stat-label">当前进程</span>
-                        <span class="mini-stat-val" style="color:var(--accent);">等待中</span>
+                        <span class="mini-stat-val text-accent">等待中</span>
                     </div>
-                    <div class="mini-stat-card" style="grid-column: span 2;">
+                    <div class="mini-stat-card span-2">
                         <span class="mini-stat-label">活跃处理账号</span>
-                        <span class="mini-stat-val" style="font-size:14px;word-break:break-all;">无活跃账号</span>
+                        <span class="mini-stat-val sm">无活跃账号</span>
                     </div>
                     <div class="mini-stat-card">
                         <span class="mini-stat-label">完成轮数</span>
@@ -55,11 +54,11 @@ export async function render(container) {
                     </div>
                     <div class="mini-stat-card">
                         <span class="mini-stat-label">成功别名</span>
-                        <span class="mini-stat-val" style="color:var(--success);">0</span>
+                        <span class="mini-stat-val text-success">0</span>
                     </div>
                     <div class="mini-stat-card">
                         <span class="mini-stat-label">已失败别名</span>
-                        <span class="mini-stat-val" style="color:var(--error);">0</span>
+                        <span class="mini-stat-val text-error">0</span>
                     </div>
                 </div>
             </div>
@@ -70,7 +69,6 @@ export async function render(container) {
 
     logPanel = createLogPanel(document.getElementById('log-panel-container'));
 
-    // Connect WebSocket for updates
     connectSocket({
         onLog: (data) => logPanel.addLog(data),
         onStatusUpdate: (data) => updateStatus(data),
@@ -80,11 +78,9 @@ export async function render(container) {
         onError: (data) => showToast(data.message, 'error'),
     });
 
-    // Load current status
     const statusRes = await api('GET', '/api/register/status');
     if (statusRes.success) updateStatus(statusRes.data);
 
-    // Button event listeners
     document.getElementById('start-btn').addEventListener('click', startRegistration);
     document.getElementById('reactivate-btn').addEventListener('click', startReactivation);
     document.getElementById('pause-btn').addEventListener('click', pauseRegistration);
@@ -137,11 +133,11 @@ async function pauseRegistration() {
     const btn = document.getElementById('pause-btn');
     if (btn.textContent.includes('暂停')) {
         await api('POST', '/api/register/pause');
-        btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> 继续任务`;
+        btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><polygon points="5 3 19 12 5 21 5 3"/></svg> 继续任务`;
         showToast('任务已发起暂停指令', 'warning');
     } else {
         await api('POST', '/api/register/resume');
-        btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg> 暂停`;
+        btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg> 暂停`;
         showToast('任务已继续运行', 'info');
     }
 }
@@ -155,6 +151,46 @@ async function stopRegistration() {
         document.getElementById('pause-btn').disabled = true;
         document.getElementById('stop-btn').disabled = true;
     }
+}
+
+function ensureStatusShell(root, labels) {
+    if (root.dataset.ready === '1') {
+        const successLabel = root.querySelector('[data-role="success-label"]');
+        const failedLabel = root.querySelector('[data-role="failed-label"]');
+        if (successLabel) successLabel.textContent = labels.success;
+        if (failedLabel) failedLabel.textContent = labels.failed;
+        return;
+    }
+
+    root.innerHTML = `
+        <div class="dashboard-head">
+            <span class="dashboard-head-title" id="dashboard-title">注册任务状态仪表盘</span>
+            <span class="badge badge-stopped" id="status-badge">已停止</span>
+        </div>
+        <div class="mini-stats-grid">
+            <div class="mini-stat-card">
+                <span class="mini-stat-label">当前进程</span>
+                <span class="mini-stat-val text-accent" id="cur-round">等待中</span>
+            </div>
+            <div class="mini-stat-card span-2">
+                <span class="mini-stat-label">活跃处理账号</span>
+                <span class="mini-stat-val sm" id="cur-email">无活跃账号</span>
+            </div>
+            <div class="mini-stat-card">
+                <span class="mini-stat-label">完成轮数</span>
+                <span class="mini-stat-val count-up" id="completed">0 轮</span>
+            </div>
+            <div class="mini-stat-card">
+                <span class="mini-stat-label" data-role="success-label">${labels.success}</span>
+                <span class="mini-stat-val text-success count-up" id="success-count">0</span>
+            </div>
+            <div class="mini-stat-card">
+                <span class="mini-stat-label" data-role="failed-label">${labels.failed}</span>
+                <span class="mini-stat-val text-error count-up" id="failed-count">0</span>
+            </div>
+        </div>
+    `;
+    root.dataset.ready = '1';
 }
 
 function updateStatus(data) {
@@ -175,41 +211,47 @@ function updateStatus(data) {
     const successLabel = isReactivate ? '补激活成功' : '成功别名';
     const failedLabel = isReactivate ? '补激活失败' : '已失败别名';
 
-    document.getElementById('reg-status').innerHTML = `
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px;">
-            <span style="font-size:13.5px;color:var(--text-secondary);font-weight:600;">${dashboardTitle}</span>
-            <span class="badge ${cls}">${text}</span>
-        </div>
-        <div class="mini-stats-grid">
-            <div class="mini-stat-card">
-                <span class="mini-stat-label">当前进程</span>
-                <span class="mini-stat-val" id="cur-round" style="color:var(--accent);">${currentRoundText}</span>
-            </div>
-            <div class="mini-stat-card" style="grid-column: span 2;">
-                <span class="mini-stat-label">活跃处理账号</span>
-                <span class="mini-stat-val" id="cur-email" style="font-size:14px;word-break:break-all;" title="${currentEmailText}">${currentEmailText}</span>
-            </div>
-            <div class="mini-stat-card">
-                <span class="mini-stat-label">完成轮数</span>
-                <span class="mini-stat-val" id="completed">${data.completed || 0} 轮</span>
-            </div>
-            <div class="mini-stat-card">
-                <span class="mini-stat-label">${successLabel}</span>
-                <span class="mini-stat-val" id="success-count" style="color:var(--success);">${data.success || 0}</span>
-            </div>
-            <div class="mini-stat-card">
-                <span class="mini-stat-label">${failedLabel}</span>
-                <span class="mini-stat-val" id="failed-count" style="color:var(--error);">${data.failed || 0}</span>
-            </div>
-        </div>
-    `;
+    const root = document.getElementById('reg-status');
+    if (!root) return;
+    ensureStatusShell(root, { success: successLabel, failed: failedLabel });
+
+    const titleEl = document.getElementById('dashboard-title');
+    const badgeEl = document.getElementById('status-badge');
+    const roundEl = document.getElementById('cur-round');
+    const emailEl = document.getElementById('cur-email');
+    const completedEl = document.getElementById('completed');
+    const successEl = document.getElementById('success-count');
+    const failedEl = document.getElementById('failed-count');
+
+    if (titleEl) titleEl.textContent = dashboardTitle;
+    if (badgeEl) {
+        const prev = badgeEl.dataset.status || '';
+        badgeEl.className = `badge ${cls}`;
+        badgeEl.textContent = text;
+        if (prev && prev !== (data.status || 'stopped')) {
+            badgeEl.classList.remove('is-flash');
+            void badgeEl.offsetWidth;
+            badgeEl.classList.add('is-flash');
+        }
+        badgeEl.dataset.status = data.status || 'stopped';
+    }
+    if (roundEl) roundEl.textContent = currentRoundText;
+    if (emailEl) {
+        emailEl.textContent = currentEmailText;
+        emailEl.title = currentEmailText;
+    }
+
+    // Animate numeric tiles from previous displayed value → new value
+    if (completedEl) countUp(completedEl, `${data.completed || 0} 轮`, { duration: 640 });
+    if (successEl) countUp(successEl, data.success || 0, { duration: 640 });
+    if (failedEl) countUp(failedEl, data.failed || 0, { duration: 640 });
 
     if (data.status === 'stopped') {
         document.getElementById('start-btn').disabled = false;
         document.getElementById('reactivate-btn').disabled = false;
         document.getElementById('pause-btn').disabled = true;
         document.getElementById('stop-btn').disabled = true;
-        document.getElementById('pause-btn').innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg> 暂停`;
+        document.getElementById('pause-btn').innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg> 暂停`;
     } else {
         document.getElementById('start-btn').disabled = true;
         document.getElementById('reactivate-btn').disabled = true;
