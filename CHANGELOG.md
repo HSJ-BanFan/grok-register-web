@@ -6,6 +6,23 @@
 
 ## [Unreleased]
 
+### 新增
+
+- 可选 **CPA（CLIProxyAPI）** 交付：注册成功后 SSO → device OAuth mint → chat probe → 热载 `xai-*.json`，失败归档 dead 目录；设置页「CPA 接入与补号」默认关闭
+- Microsoft 邮箱 **IMAP XOAUTH2** 收信路径：导入的 `M.C…` 消费令牌在 Graph/Outlook REST 不可用时回落 IMAP 取验证码
+- 注册交付可同时或独立启用 CPA 与 grok2api；CPA 成功后 grok2api 失败不再拖垮整轮交付
+
+### 修复
+
+- Docker / headless 下 SOCKS 代理不再走 DrissionPage `set_proxy`，改为 Chromium `--proxy-server`，并补充容器常用启动参数与可配置启动超时
+- 单元测试对齐 IMAP refresh 顺序与双交付日志语义
+
+### 相关提交
+
+- `fbec93e` `fix: Docker SOCKS browser, MSA IMAP OTP, optional CPA export/pool settings`
+- `6af5b21` `test: align unit tests with CPA delivery and IMAP refresh order`
+- `1792562` `Merge pull request #12 from Elliotwu-7/fix/docker-socks-imap-cpa-export`
+
 ## [v0.2.0] - 2026-07-15
 
 本次更新集中提升连续注册、Cloudflare 上下文复用、SSO 身份隔离、验证码邮件容错，以及 grok2api 导入转换的可恢复性。
