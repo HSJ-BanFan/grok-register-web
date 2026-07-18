@@ -68,11 +68,13 @@ class UIBrowserRegressionTest(unittest.TestCase):
         if hasattr(cls, 'server_thread'):
             cls.server_thread.join(timeout=2)
 
-    def _page(self, payloads):
+    def _page(self, payloads, requests=None):
         page = self.browser.new_page(viewport={'width': 1440, 'height': 1000})
 
         def handle_api(route):
             path = urlparse(route.request.url).path
+            if requests is not None:
+                requests.append(route.request)
             payload = payloads.get(path, {'success': True, 'data': []})
             route.fulfill(
                 status=200,
@@ -82,6 +84,107 @@ class UIBrowserRegressionTest(unittest.TestCase):
 
         page.route('**/api/**', handle_api)
         return page
+
+    def test_auto_turnstile_save_enables_browser_fallback(self):
+        requests = []
+        page = self._page({
+            '/api/settings': {
+                'success': True,
+                'data': {
+                    'registration_backend': 'protocol',
+                    'turnstile_provider': 'auto',
+                    'allow_browser_fallback': 'false',
+                },
+            },
+        }, requests=requests)
+        try:
+            page.goto(f'{self.base_url}/#/settings', wait_until='networkidle')
+            page.locator('#save-settings-btn').click()
+            page.wait_for_timeout(100)
+
+            put_request = next(
+                request for request in reversed(requests)
+                if request.method == 'PUT'
+                and urlparse(request.url).path == '/api/settings'
+            )
+            payload = put_request.post_data_json
+            self.assertEqual(payload['turnstile_provider'], 'auto')
+            self.assertEqual(payload['allow_browser_fallback'], 'true')
+        finally:
+            page.close()
+
+    def test_solver_status_and_manual_connection_test(self):
+        requests = []
+        page = self._page({
+            '/api/settings': {
+                'success': True,
+                'data': {
+                    'turnstile_solver_url': 'http://127.0.0.1:5072',
+                },
+            },
+            '/api/settings/turnstile-solver/test': {
+                'success': True,
+                'data': {
+                    'online': True,
+                    'reason': 'online',
+                    'status_code': 200,
+                    'latency_ms': 18,
+                },
+            },
+        }, requests=requests)
+        try:
+            page.goto(f'{self.base_url}/#/settings', wait_until='networkidle')
+            status = page.locator('#solver-health-status')
+            detail = page.locator('#solver-health-detail')
+            self.assertEqual(status.text_content(), '在线')
+            self.assertIn('HTTP 200', detail.text_content())
+            self.assertIn('18 ms', detail.text_content())
+
+            page.locator('#test-solver-btn').click()
+            page.wait_for_timeout(100)
+            probes = [
+                request for request in requests
+                if request.method == 'POST'
+                and urlparse(request.url).path
+                == '/api/settings/turnstile-solver/test'
+            ]
+            self.assertGreaterEqual(len(probes), 2)
+            self.assertEqual(
+                probes[-1].post_data_json['url'],
+                'http://127.0.0.1:5072',
+            )
+        finally:
+            page.close()
+
+    def test_solver_status_shows_connection_failure(self):
+        page = self._page({
+            '/api/settings': {
+                'success': True,
+                'data': {
+                    'turnstile_solver_url': 'http://127.0.0.1:5072',
+                },
+            },
+            '/api/settings/turnstile-solver/test': {
+                'success': True,
+                'data': {
+                    'online': False,
+                    'reason': 'connection_error',
+                    'status_code': None,
+                    'latency_ms': 3,
+                },
+            },
+        })
+        try:
+            page.goto(f'{self.base_url}/#/settings', wait_until='networkidle')
+            self.assertEqual(
+                page.locator('#solver-health-status').text_content(), '离线',
+            )
+            self.assertIn(
+                '请确认服务和端口已经启动',
+                page.locator('#solver-health-detail').text_content(),
+            )
+        finally:
+            page.close()
 
     def test_settings_values_are_escaped_and_mailbox_menu_is_visible(self):
         hostile = '\"><img id="settings-xss" src=x onerror="window.__xss=1">'

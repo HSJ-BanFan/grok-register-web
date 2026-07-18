@@ -29,6 +29,10 @@ venv/
 browser-profile*/
 *.log
 
+# Local proxy lists for Turnstile Solver (machine-specific)
+proxies.txt
+**/proxies.txt
+
 # OS / editor
 .DS_Store
 Thumbs.db

@@ -40,9 +40,12 @@ def resolve_turnstile_settings(settings=None) -> dict[str, str]:
         str(settings.get('allow_browser_fallback', '') or '').strip().lower()
         or str(os.environ.get('GROK_REGISTER_ALLOW_BROWSER_FALLBACK', '') or '').strip().lower()
     )
-    # Explicit external modes are fail-closed and never start Chrome.
+    # Provider mode is authoritative. UI-visible auto/browser modes must not be
+    # disabled by a stale hidden setting left behind by an older configuration.
     if mode in {'external', 'strict_external', 'strict'}:
         allow_browser_fallback = 'false'
+    elif mode in {'auto', 'browser'}:
+        allow_browser_fallback = 'true'
     elif allow_fallback_raw in {'0', 'false', 'no', 'off'}:
         allow_browser_fallback = 'false'
     elif allow_fallback_raw in {'1', 'true', 'yes', 'on'}:
@@ -61,6 +64,63 @@ def resolve_turnstile_settings(settings=None) -> dict[str, str]:
         'mode': mode or 'auto',
         'allow_browser_fallback': allow_browser_fallback,
         'proxy': proxy,
+    }
+
+
+def probe_turnstile_solver(solver_url: str, timeout: float = 2.0) -> dict[str, Any]:
+    """Check whether a configured solver HTTP endpoint is reachable."""
+    url = str(solver_url or '').strip().rstrip('/')
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        parsed = None
+    if (
+        parsed is None
+        or parsed.scheme not in {'http', 'https'}
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+    ):
+        return {
+            'online': False,
+            'reason': 'invalid_url',
+            'status_code': None,
+            'latency_ms': 0,
+        }
+
+    try:
+        timeout = max(0.2, min(float(timeout), 10.0))
+    except (TypeError, ValueError):
+        timeout = 2.0
+
+    session = requests.Session()
+    session.trust_env = False
+    started = time.perf_counter()
+    try:
+        response = session.get(
+            f'{url}/', timeout=timeout, allow_redirects=False,
+        )
+        latency_ms = max(0, round((time.perf_counter() - started) * 1000))
+        online = response.status_code < 500
+        return {
+            'online': online,
+            'reason': 'online' if online else 'http_error',
+            'status_code': int(response.status_code),
+            'latency_ms': latency_ms,
+        }
+    except requests.Timeout:
+        reason = 'timeout'
+    except requests.ConnectionError:
+        reason = 'connection_error'
+    except requests.RequestException:
+        reason = 'request_error'
+
+    latency_ms = max(0, round((time.perf_counter() - started) * 1000))
+    return {
+        'online': False,
+        'reason': reason,
+        'status_code': None,
+        'latency_ms': latency_ms,
     }
 
 
@@ -122,7 +182,9 @@ class ExternalTurnstileProvider:
         self.proxy = (proxy or '').strip()
         self.timeout = max(15, int(timeout or 90))
         self.poll_interval = max(0.5, float(poll_interval or 2.0))
+        # Loopback solver must not ride system HTTP(S)_PROXY (common local 7897).
         self._http = requests.Session()
+        self._http.trust_env = False
 
     @classmethod
     def from_settings(cls, settings=None, *, timeout: int = 90) -> 'ExternalTurnstileProvider | None':

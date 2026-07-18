@@ -227,6 +227,119 @@ def apply_cookies_to_session(session: requests.Session, cookies) -> int:
     return applied
 
 
+def clear_identity_cookies(session: requests.Session) -> int:
+    """Drop SSO / identity cookies so the next round cannot reuse a prior login.
+
+    Keep Cloudflare / anti-bot cookies (``__cf_bm``, ``cf_clearance``) so pure-HTTP
+    transport still benefits from the warmed session. Returns how many cookies
+    were removed.
+
+    curl_cffi notes:
+    - ``list(session.cookies)`` yields *names* (str), not Cookie objects
+    - ``Cookies.delete(name)`` only removes one domain entry; SSO is stamped on
+      several domains (``.x.ai``, ``x.ai``, ``.grok.com``, …)
+    - Prefer walking ``session.cookies.jar`` and clearing each match by
+      ``(domain, path, name)``
+    """
+    if session is None:
+        return 0
+    cookies = getattr(session, 'cookies', None)
+    if cookies is None:
+        return 0
+
+    identity_names = {
+        'sso',
+        'sso-rw',
+        'sso_token',
+        'sso-token',
+        'auth_token',
+        'session',
+        'sessionid',
+    }
+
+    def _is_identity(name: str) -> bool:
+        lower = str(name or '').strip().lower()
+        return bool(lower) and (lower in identity_names or lower.startswith('sso'))
+
+    removed = 0
+    jar = getattr(cookies, 'jar', None)
+
+    # Primary path: http.cookiejar under curl_cffi / requests.
+    if jar is not None:
+        try:
+            snapshot = list(jar)
+        except Exception:
+            snapshot = []
+        for cookie in snapshot:
+            try:
+                name = str(getattr(cookie, 'name', '') or '')
+            except Exception:
+                name = ''
+            if not _is_identity(name):
+                continue
+            domain = getattr(cookie, 'domain', None)
+            path = getattr(cookie, 'path', None) or '/'
+            try:
+                jar.clear(domain, path, name)
+                removed += 1
+                continue
+            except Exception:
+                pass
+            # curl_cffi Cookies.delete(name) as secondary.
+            delete = getattr(cookies, 'delete', None)
+            if callable(delete):
+                try:
+                    delete(name)
+                    removed += 1
+                except Exception:
+                    pass
+
+    # Mapping-style fallback when jar is missing or incomplete.
+    try:
+        for name in list(cookies.keys()):
+            if not _is_identity(name):
+                continue
+            deleted = False
+            delete = getattr(cookies, 'delete', None)
+            if callable(delete):
+                try:
+                    delete(name)
+                    deleted = True
+                except Exception:
+                    deleted = False
+            if not deleted:
+                try:
+                    cookies.pop(name, None)
+                    deleted = True
+                except Exception:
+                    deleted = False
+            if deleted:
+                removed += 1
+    except Exception:
+        pass
+
+    # If any identity cookie is still readable, wipe the whole jar.
+    try:
+        leftover = read_sso_cookie_from_session(session)
+    except Exception:
+        leftover = ''
+    if leftover:
+        clear = getattr(cookies, 'clear', None)
+        if callable(clear):
+            try:
+                clear()
+                removed = max(removed, 1)
+            except Exception:
+                pass
+        elif jar is not None:
+            try:
+                jar.clear()
+                removed = max(removed, 1)
+            except Exception:
+                pass
+    return removed
+
+
 def redact_sensitive_text(text: str, *, limit: int = 400) -> str:
     """Strip JWT / set-cookie / SSO secrets before logging or WebSocket emit."""
     if not text:

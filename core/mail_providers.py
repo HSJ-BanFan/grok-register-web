@@ -43,30 +43,69 @@ def normalize_provider(value):
 
 
 def extract_verification_code(text, subject=''):
-    """Extract xAI's alphanumeric or numeric verification code."""
+    """Extract xAI's alphanumeric or numeric verification code.
+
+    Prefer subject-line codes (``SpaceXAI confirmation code: WKT-B4B`` /
+    ``WKT-B4B xAI``). Body HTML often contains false positives like CSS
+    tokens (``PER100``), so hyphenated 3-3 codes always win over bare
+    6-char alphanumeric fallbacks.
+    """
     subject = str(subject or '')
     body = str(text or '')
+    haystacks = []
     if subject:
-        match = re.search(
-            r'^\s*([A-Z0-9]{3}-[A-Z0-9]{3})\s+xAI',
-            subject,
-            re.IGNORECASE,
-        )
+        haystacks.append(subject)
+    if body:
+        haystacks.append(body)
+
+    # 1) Subject-first: modern xAI / SpaceXAI subject formats.
+    subject_patterns = (
+        r'(?:SpaceXAI|xAI|Grok).*?(?:confirmation|verification)\s*code[:\s]+([A-Z0-9]{3}-[A-Z0-9]{3})',
+        r'(?:confirmation|verification)\s*code[:\s]+([A-Z0-9]{3}-[A-Z0-9]{3})',
+        r'^\s*([A-Z0-9]{3}-[A-Z0-9]{3})\s+xAI',
+        r'\b([A-Z0-9]{3}-[A-Z0-9]{3})\b',
+    )
+    for pattern in subject_patterns:
+        match = re.search(pattern, subject, re.IGNORECASE)
         if match:
             return match.group(1).upper().replace('-', '')
 
-    patterns = (
+    # 2) Body: prefer hyphenated 3-3 codes (real xAI OTP shape).
+    body_hyphen = (
+        r'(?:confirmation|verification)\s*code[:\s]+([A-Z0-9]{3}-[A-Z0-9]{3})',
         r'\b([A-Z0-9]{3}-[A-Z0-9]{3})\b.*confirmation\s*code',
         r'\b([A-Z0-9]{3}-[A-Z0-9]{3})\b',
-        r'(?:verification\s*code|your\s*code|confirm(?:ation)?\s*code)[:\s]+(\d{4,8})',
-        r'(?:验证码|代码|确认码)[:\s为]+(\d{4,8})',
-        r'\b(\d{6})\b',
-        r'\b((?=[A-Z0-9]{0,5}\d)[A-Z0-9]{6})\b',
     )
-    for pattern in patterns:
+    for pattern in body_hyphen:
         match = re.search(pattern, body, re.IGNORECASE | re.DOTALL)
         if match:
             return match.group(1).upper().replace('-', '')
+
+    # 3) Numeric / labeled codes.
+    numeric_patterns = (
+        r'(?:verification\s*code|your\s*code|confirm(?:ation)?\s*code)[:\s]+(\d{4,8})',
+        r'(?:验证码|代码|确认码)[:\s为]+(\d{4,8})',
+        r'\b(\d{6})\b',
+    )
+    for pattern in numeric_patterns:
+        for hay in haystacks:
+            match = re.search(pattern, hay, re.IGNORECASE | re.DOTALL)
+            if match:
+                return match.group(1).upper().replace('-', '')
+
+    # 4) Last-resort alphanumeric — only from non-HTML-looking plain text,
+    # and only when the token contains a digit (avoids CSS class noise).
+    plain = body
+    if '<' in body and '>' in body:
+        plain = re.sub(r'<[^>]+>', ' ', body)
+        plain = html.unescape(plain)
+    match = re.search(
+        r'\b((?=[A-Z0-9]{0,5}\d)[A-Z0-9]{6})\b',
+        plain,
+        re.IGNORECASE,
+    )
+    if match:
+        return match.group(1).upper().replace('-', '')
     return None
 
 
@@ -511,7 +550,13 @@ class TemporaryMailboxProviders:
                 continue
             for field in ('text', 'raw', 'content', 'intro', 'body', 'snippet'):
                 value = source.get(field)
-                if isinstance(value, str) and value.strip():
+                if not isinstance(value, str) or not value.strip():
+                    continue
+                # Cloud Mail puts full HTML in ``content``; strip tags so
+                # extractors see the human-readable body, not CSS tokens.
+                if field == 'content' and '<' in value and '>' in value:
+                    parts.append(re.sub(r'<[^>]+>', ' ', html.unescape(value)))
+                else:
                     parts.append(value)
             html_values = source.get('html') or []
             if isinstance(html_values, str):

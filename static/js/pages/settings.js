@@ -207,37 +207,102 @@ export async function render(container) {
                 </div>
             `)}
 
-            ${section(ICONS.browser, '注册后端与人机', '浏览器是默认后端；协议模式为实验功能，并可使用外置 Turnstile。', `
-                <div class="settings-grid">
-                    ${selectField('s-registration-backend', '注册传输后端', registrationBackend, [
-                        { value: 'browser', label: '浏览器（默认）' },
-                        { value: 'protocol', label: 'HTTP 协议 Worker（实验）' },
-                        { value: 'auto', label: '自动 → 协议（实验）' },
-                    ])}
-                    ${selectField('s-turnstile-provider', '协议 Turnstile 提供方', turnstileProvider, [
-                        { value: 'auto', label: '自动（外置优先，可回退浏览器）' },
-                        { value: 'external', label: '仅外置 / 零浏览器（失败即退出）' },
-                        { value: 'browser', label: '仅本机浏览器' },
-                    ])}
-                </div>
+            ${section(ICONS.browser, '注册后端与人机', '选择谁跑注册主流程；相关选项会随路径自动显示。', `
                 <div class="settings-field-block">
-                    <div class="settings-field-label">浏览器运行模式</div>
-                    ${choiceGroup('headless', [
-                        { value: 'false', title: '有头 / Xvfb 模式', desc: '推荐。真实渲染环境，更不容易被 Cloudflare 拦。', recommend: true },
-                        { value: 'true', title: '无头模式', desc: '资源占用更低，但可能被 Cloudflare 拦截。' },
-                    ], headless)}
+                    <div class="settings-field-label">注册传输后端</div>
+                    ${choiceGroup('registration-backend', [
+                        {
+                            value: 'browser',
+                            title: '浏览器注册',
+                            desc: '本机 Chrome / Xvfb 打开注册页，Turnstile 在页面内完成。适合本机调试。',
+                            recommend: true,
+                        },
+                        {
+                            value: 'protocol',
+                            title: '协议注册',
+                            desc: 'HTTP 完成注册，不启业务 Chrome。Turnstile 走本地 Solver 或 YesCaptcha。',
+                        },
+                        {
+                            value: 'auto',
+                            title: '自动（优先协议）',
+                            desc: '先走协议路径；外置 Turnstile 失败时可按下方策略回退浏览器。',
+                        },
+                    ], registrationBackend)}
+                    <input type="hidden" id="s-registration-backend" value="${esc(registrationBackend)}">
                 </div>
-                <div class="settings-field-block">
-                    <div class="settings-field-label">Turnstile 人机验证</div>
-                    ${choiceGroup('turnstile', [
-                        { value: 'true', title: '自动过验证', desc: '走自动求解器，适合无人值守。', recommend: true },
-                        { value: 'false', title: '手动过验证', desc: '浏览器弹窗时由人工点击完成。' },
-                    ], turnstile)}
+
+                <div class="backend-settings" data-backend-panel="browser">
+                    <div class="settings-field-block">
+                        <div class="settings-field-label">浏览器运行模式</div>
+                        ${choiceGroup('headless', [
+                            { value: 'false', title: '有头 / Xvfb', desc: '真实渲染，更不容易被 Cloudflare 拦截。', recommend: true },
+                            { value: 'true', title: '无头模式', desc: '占用更低，但更容易被拦截。' },
+                        ], headless)}
+                    </div>
+                    <div class="settings-field-block">
+                        <div class="settings-field-label">页面内 Turnstile</div>
+                        ${choiceGroup('turnstile', [
+                            { value: 'true', title: '自动过验证', desc: '页面内自动求解，适合无人值守。', recommend: true },
+                            { value: 'false', title: '手动过验证', desc: '弹窗出现时由人工点击完成。' },
+                        ], turnstile)}
+                    </div>
                 </div>
-                <div class="settings-grid">
-                    ${field('s-browser-proxy', '浏览器 / 邮箱 API 代理', s.browser_proxy || '', { type: 'text', mono: true, placeholder: 'http://127.0.0.1:7897 （留空=直连）' })}
-                    ${field('s-yescaptcha-key', 'YesCaptcha Key', s.yescaptcha_key || '', { type: 'password' })}
-                    ${field('s-turnstile-solver-url', '本地 Turnstile Solver URL', s.turnstile_solver_url || 'http://127.0.0.1:5072', { type: 'text', mono: true })}
+
+                <div class="backend-settings" data-backend-panel="protocol">
+                    <div class="settings-field-block">
+                        <div class="settings-field-label">Turnstile 来源</div>
+                        ${choiceGroup('turnstile-provider', [
+                            {
+                                value: 'external',
+                                title: '仅外置求解',
+                                desc: '本地 Solver 或 YesCaptcha；失败即退出，不回退注册 Chrome。',
+                                recommend: true,
+                            },
+                            {
+                                value: 'auto',
+                                title: '外置优先，可回退',
+                                desc: '先走本地 Solver / YesCaptcha，失败后再用本机注册浏览器。',
+                            },
+                            {
+                                value: 'browser',
+                                title: '仅注册浏览器',
+                                desc: '不用外置求解，直接用本机 Chrome 过 Turnstile。',
+                            },
+                        ], turnstileProvider)}
+                        <input type="hidden" id="s-turnstile-provider" value="${esc(turnstileProvider)}">
+                    </div>
+                    <div class="settings-grid">
+                        ${field('s-turnstile-solver-url', '本地 Turnstile Solver', s.turnstile_solver_url || 'http://127.0.0.1:5072', {
+                            type: 'text',
+                            mono: true,
+                            helper: 'Camoufox 仅解验证码，不是注册浏览器。协议部署推荐优先用它。',
+                        })}
+                        ${field('s-yescaptcha-key', 'YesCaptcha Key', s.yescaptcha_key || '', {
+                            type: 'password',
+                            helper: '可选云打码。机器不能跑任何浏览器时再填。',
+                        })}
+                    </div>
+                    <div class="solver-health-card" id="solver-health-card" data-state="checking">
+                        <div class="solver-health-state">
+                            <span class="solver-health-dot" aria-hidden="true"></span>
+                            <span id="solver-health-status">检测中</span>
+                        </div>
+                        <div class="solver-health-detail" id="solver-health-detail" aria-live="polite">正在检查 Solver 连接…</div>
+                        <div class="solver-health-actions">
+                            <button type="button" class="btn btn-sm btn-secondary" id="test-solver-btn">测试连接</button>
+                            <button type="button" class="btn btn-sm btn-primary" id="start-solver-btn">启动本地 Solver</button>
+                            <button type="button" class="btn btn-sm btn-secondary" id="stop-solver-btn">停止</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="settings-grid settings-grid-1">
+                    ${field('s-browser-proxy', '出口代理', s.browser_proxy || '', {
+                        type: 'text',
+                        mono: true,
+                        placeholder: 'http://127.0.0.1:7897 （留空=直连）',
+                        helper: '注册、邮箱 API 与本地 Solver 任务共用；协议路径会把代理传给 Solver。',
+                    })}
                 </div>
             `)}
 
@@ -378,9 +443,23 @@ export async function render(container) {
     initSelects(container);
     bindChoiceCards(container);
     updateProviderSettings(container);
+    updateBackendSettings(container);
+    bindBackendChoices(container);
 
     container.querySelector('#save-settings-btn')?.addEventListener('click', saveSettings);
     container.querySelector('#reset-settings-btn')?.addEventListener('click', resetSettings);
+    container.querySelector('#test-solver-btn')?.addEventListener('click', () => {
+        void testSolverConnection({ notify: true });
+    });
+    container.querySelector('#start-solver-btn')?.addEventListener('click', () => {
+        void controlLocalSolver('start');
+    });
+    container.querySelector('#stop-solver-btn')?.addEventListener('click', () => {
+        void controlLocalSolver('stop');
+    });
+    container.querySelector('#s-turnstile-solver-url')?.addEventListener('input', () => {
+        setSolverHealth('idle', '待检测', 'URL 已修改，点击“测试连接”检查当前地址。');
+    });
     container.querySelector('#s-email-provider')?.addEventListener('change', () => {
         updateProviderSettings(container);
     });
@@ -391,6 +470,7 @@ export async function render(container) {
             group?.classList.toggle('is-open', manual);
         });
     });
+    void testSolverConnection();
 }
 
 function bindChoiceCards(root) {
@@ -413,7 +493,181 @@ function updateProviderSettings(root) {
     });
 }
 
+function currentRegistrationBackend(root = document) {
+    return root.querySelector('input[name="registration-backend"]:checked')?.value
+        || root.querySelector('#s-registration-backend')?.value
+        || 'browser';
+}
+
+function currentTurnstileProvider(root = document) {
+    return root.querySelector('input[name="turnstile-provider"]:checked')?.value
+        || root.querySelector('#s-turnstile-provider')?.value
+        || 'auto';
+}
+
+function updateBackendSettings(root) {
+    const backend = currentRegistrationBackend(root);
+    const usesBrowser = backend === 'browser' || backend === 'auto';
+    const usesProtocol = backend === 'protocol' || backend === 'auto';
+    const hiddenBackend = root.querySelector('#s-registration-backend');
+    if (hiddenBackend) hiddenBackend.value = backend;
+
+    root.querySelectorAll('[data-backend-panel="browser"]').forEach((panel) => {
+        panel.hidden = !usesBrowser;
+    });
+    root.querySelectorAll('[data-backend-panel="protocol"]').forEach((panel) => {
+        panel.hidden = !usesProtocol;
+    });
+}
+
+function bindBackendChoices(root) {
+    root.querySelectorAll('input[name="registration-backend"]').forEach((radio) => {
+        radio.addEventListener('change', () => updateBackendSettings(root));
+    });
+    root.querySelectorAll('input[name="turnstile-provider"]').forEach((radio) => {
+        radio.addEventListener('change', () => {
+            const hidden = root.querySelector('#s-turnstile-provider');
+            if (hidden) hidden.value = currentTurnstileProvider(root);
+        });
+    });
+}
+
+function setSolverHealth(state, statusText, detailText) {
+    const card = document.getElementById('solver-health-card');
+    const status = document.getElementById('solver-health-status');
+    const detail = document.getElementById('solver-health-detail');
+    if (card) card.dataset.state = state;
+    if (status) status.textContent = statusText;
+    if (detail) detail.textContent = detailText;
+}
+
+function solverOfflineDetail(data) {
+    const reason = data?.reason || 'request_error';
+    if (reason === 'invalid_url') return 'Solver URL 无效，仅支持不含账号密码的 HTTP/HTTPS 地址。';
+    if (reason === 'timeout') return `连接超时 · ${data.latency_ms ?? 0} ms`;
+    if (reason === 'connection_error') return '无法连接到 Solver，请确认服务和端口已经启动。';
+    if (reason === 'http_error') return `Solver 响应 HTTP ${data.status_code ?? '5xx'}。`;
+    return 'Solver 状态检测失败，请检查地址和服务日志。';
+}
+
+async function testSolverConnection({ notify = false } = {}) {
+    const input = document.getElementById('s-turnstile-solver-url');
+    const button = document.getElementById('test-solver-btn');
+    const url = input?.value.trim() || '';
+    setSolverHealth('checking', '检测中', '正在检查 Solver 连接…');
+    if (button) button.disabled = true;
+    try {
+        const res = await api('POST', '/api/settings/turnstile-solver/test', { url });
+        const data = res.data || {};
+        if (res.success && data.online) {
+            const detail = `HTTP ${data.status_code} · ${data.latency_ms ?? 0} ms`;
+            setSolverHealth('online', '在线', detail);
+            if (notify) showToast(`Solver 连接成功：${detail}`, 'success');
+            return;
+        }
+        const detail = res.success ? solverOfflineDetail(data) : (res.message || '检测请求失败');
+        setSolverHealth('offline', '离线', detail);
+        if (notify) showToast(detail, 'error');
+    } finally {
+        if (button) button.disabled = false;
+    }
+}
+
+async function controlLocalSolver(action) {
+    const input = document.getElementById('s-turnstile-solver-url');
+    const startBtn = document.getElementById('start-solver-btn');
+    const stopBtn = document.getElementById('stop-solver-btn');
+    const url = input?.value.trim() || '';
+    const busyLabel = action === 'stop' ? '停止中…' : '启动中…';
+    setSolverHealth('checking', busyLabel, action === 'stop'
+        ? '正在停止本地 Solver 子进程…'
+        : '正在拉起本地 Solver（首次可能下载 Camoufox，需数十秒）…');
+    if (startBtn) startBtn.disabled = true;
+    if (stopBtn) stopBtn.disabled = true;
+    try {
+        const res = await api(
+            'POST',
+            `/api/settings/turnstile-solver/${action}`,
+            { url },
+        );
+        const data = res.data || {};
+        if (action === 'stop') {
+            // After stop, re-probe so an externally managed solver is not
+            // falsely marked offline if it is still serving.
+            const stillUp = await probeSolverOnline(url);
+            if (stillUp?.online) {
+                setSolverHealth(
+                    'online',
+                    '在线',
+                    '停止请求已发送，但该地址仍可访问（可能由外部进程托管）。',
+                );
+                showToast('Solver 仍在线（外部进程）', 'success');
+            } else {
+                setSolverHealth('offline', '已停止', res.message || '本地 Solver 已请求停止');
+                showToast(res.message || '本地 Solver 已停止', res.success === false ? 'error' : 'success');
+            }
+            return;
+        }
+        if (res.success && data.online) {
+            const detail = data.pid
+                ? `PID ${data.pid} · ${data.url || url || 'http://127.0.0.1:5072'}`
+                : (data.url || '本地 Solver 在线');
+            setSolverHealth('online', '在线', detail);
+            showToast(res.message || '本地 Solver 已启动', 'success');
+            return;
+        }
+
+        // Start API missing/failed (e.g. old app process without new routes)
+        // must not paint the card offline when the solver is already healthy.
+        const probe = await probeSolverOnline(url);
+        if (probe?.online) {
+            const latency = probe.latency_ms != null ? ` · ${probe.latency_ms} ms` : '';
+            setSolverHealth(
+                'online',
+                '在线',
+                `Solver 已在线（HTTP ${probe.status_code ?? 200}${latency}）。`
+                    + (res.message ? ` 启动接口：${res.message}` : ''),
+            );
+            showToast(
+                res.message && /not\s*found/i.test(String(res.message))
+                    ? 'Solver 已在线。启动接口 404：请重启 python app.py 以加载新路由。'
+                    : 'Solver 已在线，无需重复启动。',
+                'success',
+            );
+            return;
+        }
+
+        const detail = data.last_error || res.message || '本地 Solver 启动失败';
+        setSolverHealth('offline', '离线', detail);
+        showToast(detail, 'error');
+    } catch (err) {
+        const detail = err?.message || '请求失败';
+        const probe = await probeSolverOnline(url);
+        if (probe?.online) {
+            setSolverHealth('online', '在线', `Solver 仍在线；启动请求异常：${detail}`);
+            showToast(`Solver 仍在线：${detail}`, 'error');
+        } else {
+            setSolverHealth('offline', '离线', detail);
+            showToast(detail, 'error');
+        }
+    } finally {
+        if (startBtn) startBtn.disabled = false;
+        if (stopBtn) stopBtn.disabled = false;
+    }
+}
+
+async function probeSolverOnline(url) {
+    try {
+        const res = await api('POST', '/api/settings/turnstile-solver/test', { url: url || '' });
+        if (res.success && res.data?.online) return res.data;
+    } catch (_) {
+        /* ignore */
+    }
+    return null;
+}
+
 function collectSettings() {
+    const turnstileProvider = currentTurnstileProvider();
     return {
         email_provider: document.getElementById('s-email-provider').value,
         duckmail_api_base: document.getElementById('s-duckmail-api-base').value.trim(),
@@ -440,11 +694,12 @@ function collectSettings() {
         max_confirm_retries: document.getElementById('s-confirm-retries').value,
         max_retries_per_alias: document.getElementById('s-alias-retries').value,
         registration_concurrency: document.getElementById('s-registration-concurrency').value,
-        registration_backend: document.getElementById('s-registration-backend').value,
-        browser_headless: document.querySelector('input[name="headless"]:checked').value,
-        turnstile_auto: document.querySelector('input[name="turnstile"]:checked').value,
+        registration_backend: currentRegistrationBackend(),
+        browser_headless: document.querySelector('input[name="headless"]:checked')?.value || 'false',
+        turnstile_auto: document.querySelector('input[name="turnstile"]:checked')?.value || 'true',
         browser_proxy: document.getElementById('s-browser-proxy').value.trim(),
-        turnstile_provider: document.getElementById('s-turnstile-provider').value,
+        turnstile_provider: turnstileProvider,
+        allow_browser_fallback: turnstileProvider === 'external' ? 'false' : 'true',
         yescaptcha_key: document.getElementById('s-yescaptcha-key').value.trim(),
         turnstile_solver_url: document.getElementById('s-turnstile-solver-url').value.trim(),
         random_name_enabled: document.querySelector('input[name="random-name"]:checked').value,

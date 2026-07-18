@@ -93,6 +93,23 @@ RegistrationEngine
 | CPA mint | 复用 `sso_to_build_credential` | 与 grok2api Build 凭证同源，避免第二套 OAuth |
 | Chat probe | `curl_cffi` | 与协议注册路径一致的 TLS 指纹 |
 
+### D7 · 本地 Turnstile Solver 子进程托管（vendoring）
+
+| | |
+|--|--|
+| **背景** | 协议 Worker 已有 YesCaptcha / 本地 HTTP Solver 客户端，但仓库原先不附带真实 Solver 进程，设置页 `5072` 默认离线。 |
+| **决策** | 将参考工程的 `api_solver` 迁入 `services/turnstile_solver/`；`solver_manager` 用 `subprocess` 托管。依赖放在 `requirements-solver.txt`，主依赖不捆绑 Camoufox。生命周期 B：满足「需本地 Solver」时 `app.py` 后台 `start_async`，设置页可 start/stop，退出 `stop()`。仅管理 loopback URL。任务可带 `proxy=` 与注册出口对齐；客户端访问 loopback 时 `trust_env=False`。 |
+| **后果** | 未装 solver 依赖时 Web 仍可启动，自动/手动 start 会给出明确错误；填了 YesCaptcha 或 provider=browser 时不起子进程。协议 + 本地 Solver = 无注册 Chrome 的合法部署；「仅外置」禁止的是注册 Chrome 回退，不是 Camoufox Solver。 |
+| **替代方案** | 懒启动（首次 solve 时再起）— 首轮延迟更大；纯 YesCaptcha — 适合绝对不能跑浏览器二进制的环境。 |
+
+### D8 · 协议批跑：每轮重建 session + OTP 主题优先
+
+| | |
+|--|--|
+| **背景** | curl_cffi cookie jar 在多域（`.x.ai` / `.grok.com`）保留上一账号 SSO；仅 `cookies.clear()` 或按 name 删不干净，导致后续轮次 duplicate SSO。Cloud Mail 正文 HTML 含 `PER100` 等 CSS 片段时，旧验证码提取会盖过主题里的 `WKT-B4B`。 |
+| **决策** | 纯 HTTP 每轮 `build_protocol_session` 重建，仅移植 CF cookie；`clear_identity_cookies` 走 jar 级多域删除。`extract_verification_code` 优先 subject 的 SpaceXAI/xAI 模式，并 strip HTML。 |
+| **后果** | 批跑不再串号；验证码提取对 Cloud Mail 更稳。 |
+
 ## 已知限制
 
 1. IMAP 路径扫最近约 40 封邮件，极高噪邮箱可能漏码或变慢。
@@ -100,6 +117,7 @@ RegistrationEngine
 3. 仓库无官方 Compose；Docker 文档只覆盖代理与 Chrome 启动约束。
 4. `cpa_pool_enabled` 无进程内执行器，文档必须写清依赖外部 timer。
 5. 完整「xAI 发码 → IMAP 取码」e2e 仍依赖真实注册轮次与邮箱库存。
+6. 本地 Solver 首次需下载 Camoufox（约 100MB）；自动 start 失败累计 3 次后停止重试，需手动 restart。
 
 ## 安全考量
 
@@ -112,4 +130,6 @@ RegistrationEngine
 
 | 日期 | 变更 | 理由 |
 |------|------|------|
+| 2026-07-18 | D8：协议批跑 session 重建 + jar 级多域 SSO 清理；OTP subject-first（SpaceXAI） | 连续注册 duplicate SSO；Cloud Mail 主题码被 HTML 伪码抢走 |
+| 2026-07-18 | D7：本地 Turnstile Solver vendoring + solver_manager 生命周期 B | 设置页 5072 默认离线；协议路径需要可复现的真实外置求解能力 |
 | 2026-07-18 | PR #12：Docker/SOCKS 浏览器、MSA IMAP OTP、可选 CPA 导出与双交付语义；补本设计文档 | 容器 SOCKS 挂起、导入号 Graph 401、CPA 热载需求；verify-change 要求大改有 DESIGN 留痕 |

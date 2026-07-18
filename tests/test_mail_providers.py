@@ -29,6 +29,25 @@ class TemporaryMailboxProviderInterfaceTest(unittest.TestCase):
             'ABC123',
         )
 
+    def test_extracts_spacexai_subject_code(self):
+        """Cloud Mail / xAI currently titles mails like SpaceXAI confirmation code: WKT-B4B."""
+        self.assertEqual(
+            extract_verification_code(
+                '<html><style>.per100{width:100%}</style><body>ignore PER100</body></html>',
+                subject='SpaceXAI confirmation code: WKT-B4B',
+            ),
+            'WKTB4B',
+        )
+
+    def test_html_body_does_not_steal_css_token_over_subject_code(self):
+        self.assertEqual(
+            extract_verification_code(
+                'font-size:PER100; color:red',
+                subject='SpaceXAI confirmation code: YKS-YHX',
+            ),
+            'YKSYHX',
+        )
+
     def test_extracts_numeric_code_from_non_latin_content(self):
         self.assertEqual(
             extract_verification_code(

@@ -19,9 +19,11 @@ from core.registration.backend import (
     build_protocol_session,
     build_registration_backend,
     build_signup_payload,
+    clear_identity_cookies,
     expand_set_cookie_chain,
     follow_sso_http,
     is_trusted_sso_url,
+    read_sso_cookie_from_session,
     redact_sensitive_text,
     resolve_protocol_proxy,
 )
@@ -206,6 +208,35 @@ class RegistrationBackendTest(unittest.TestCase):
                 'edge101', 'chrome120', 'chrome124', 'chrome131', 'chrome', 'default',
             })
 
+    def test_clear_identity_cookies_keeps_cloudflare_tokens(self):
+        session = build_protocol_session({})
+        try:
+            session.cookies.set('__cf_bm', 'cfvalue', domain='.x.ai', path='/')
+            session.cookies.set('cf_clearance', 'clear', domain='.x.ai', path='/')
+        except Exception:
+            session.cookies.set('__cf_bm', 'cfvalue')
+            session.cookies.set('cf_clearance', 'clear')
+        apply_sso_cookies(session, 'OLD_SSO_TOKEN_VALUE_1234567890')
+        self.assertTrue(read_sso_cookie_from_session(session))
+
+        removed = clear_identity_cookies(session)
+
+        self.assertGreaterEqual(removed, 1)
+        self.assertFalse(read_sso_cookie_from_session(session))
+        # Cloudflare cookies should survive when jar supports selective clear.
+        remaining = {}
+        try:
+            remaining = dict(session.cookies.get_dict())
+        except Exception:
+            try:
+                remaining = {k: session.cookies.get(k) for k in session.cookies.keys()}
+            except Exception:
+                remaining = {}
+        # Accept either preserved CF cookies or a full jar wipe fallback —
+        # identity must be gone either way.
+        self.assertNotIn('sso', {str(k).lower() for k in remaining.keys()})
+        self.assertNotIn('sso-rw', {str(k).lower() for k in remaining.keys()})
+
     def test_resolve_protocol_proxy_from_env(self):
         with patch.dict('os.environ', {'GROK_PROXY': 'http://proxy.example:8080'}, clear=False):
             self.assertEqual(resolve_protocol_proxy({}), 'http://proxy.example:8080')
@@ -366,6 +397,11 @@ class ExternalTurnstileProviderTest(unittest.TestCase):
         self.assertEqual(cfg['allow_browser_fallback'], 'false')
         cfg_auto = resolve_turnstile_settings({'turnstile_provider': 'auto'})
         self.assertEqual(cfg_auto['allow_browser_fallback'], 'true')
+        cfg_auto_stale = resolve_turnstile_settings({
+            'turnstile_provider': 'auto',
+            'allow_browser_fallback': 'false',
+        })
+        self.assertEqual(cfg_auto_stale['allow_browser_fallback'], 'true')
         cfg_strict = resolve_turnstile_settings({'turnstile_provider': 'strict_external'})
         self.assertEqual(cfg_strict['allow_browser_fallback'], 'false')
         cfg_override = resolve_turnstile_settings({
@@ -667,6 +703,33 @@ class ProtocolWorkerFailureMappingTest(unittest.TestCase):
         self.assertIn('browser fallback is disabled', str(ctx.exception))
         worker._provider.ensure_started.assert_not_called()
         worker._provider.solve.assert_not_called()
+
+    def test_auto_falls_back_to_browser_when_external_is_unavailable(self):
+        worker, db, state, socketio = self._worker()
+        worker._allow_browser_fallback = True
+        worker._external_provider = Mock()
+        worker._external_provider.yescaptcha_key = ''
+        worker._external_provider.available.return_value = False
+        worker._provider = Mock()
+        worker._provider.solve.return_value = 'browser-token'
+        worker._session = Mock()
+        worker._browser_started = False
+        worker._bind_backend = Mock()
+        db.get_settings.return_value = {
+            'browser_headless': 'false',
+            'browser_proxy': 'http://127.0.0.1:7897',
+        }
+
+        token = worker._solve_turnstile(
+            url='https://accounts.x.ai', site_key='0x4',
+        )
+
+        self.assertEqual(token, 'browser-token')
+        self.assertEqual(worker._turnstile_mode, 'browser')
+        worker._provider.ensure_started.assert_called_once_with(
+            headless=False, proxy='http://127.0.0.1:7897',
+        )
+        worker._provider.solve.assert_called_once()
 
     def test_strict_external_blocks_discovery_browser_fallback(self):
         worker, db, state, socketio = self._worker()

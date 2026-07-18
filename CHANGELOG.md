@@ -6,22 +6,67 @@
 
 ## [Unreleased]
 
+（暂无）
+
+## [v0.4.0] - 2026-07-18
+
+本版本把 **协议注册 + 本地 Camoufox Turnstile Solver** 收成可部署能力：Solver 入库托管、OTP/SSO 批跑稳定性、设置页按路径显隐，并纳入 CPA / IMAP 交付与注册节奏控制。
+
 ### 新增
 
-- 可选 **CPA（CLIProxyAPI）** 交付：注册成功后 SSO → device OAuth mint → chat probe → 热载 `xai-*.json`，失败归档 dead 目录；设置页「CPA 接入与补号」默认关闭
-- Microsoft 邮箱 **IMAP XOAUTH2** 收信路径：导入的 `M.C…` 消费令牌在 Graph/Outlook REST 不可用时回落 IMAP 取验证码
-- 注册交付可同时或独立启用 CPA 与 grok2api；CPA 成功后 grok2api 失败不再拖垮整轮交付
+- **本地 Turnstile Solver vendoring**：`services/turnstile_solver/`（Camoufox / Chromium HTTP API）+ `services/solver_manager.py` 子进程托管；默认 `http://127.0.0.1:5072`
+- 应用启动按设置自动拉起本地 Solver（未填 YesCaptcha、Turnstile 非「仅浏览器」、URL 为本机回环）；退出时回收子进程
+- 设置 API：`/api/settings/turnstile-solver/{status,start,stop,restart,test}`；设置页「测试连接 / 启动 / 停止」
+- 可选依赖 `requirements-solver.txt`（主 `requirements.txt` 保持轻量）
+- Solver 任务级代理：`/turnstile?proxy=` 与注册出口对齐；客户端对 loopback 使用 `trust_env=False`，避免系统代理劫持本机 Solver
+- 设置页「注册后端与人机」按路径融合说明：浏览器 / 协议 / 自动三选一，相关字段随路径显隐
+- **可配置注册间隔** `registration_interval_seconds`（轮次间等待）
+- **grok2api 上传前 chat 可用性探测**（权限不足时跳过推送，本地仍保存 SSO）
+- 可选 **CPA（CLIProxyAPI）** 交付：SSO → device OAuth mint → chat probe → 热载 `xai-*.json`；设置页默认关闭
+- Microsoft **IMAP XOAUTH2** 收信：`M.C…` 消费令牌在 Graph/Outlook REST 不可用时回落 IMAP
+- 注册交付可同时或独立启用 CPA 与 grok2api；CPA 成功后 grok2api 失败不拖垮整轮
 
 ### 修复
 
-- Docker / headless 下 SOCKS 代理不再走 DrissionPage `set_proxy`，改为 Chromium `--proxy-server`，并补充容器常用启动参数与可配置启动超时
-- 单元测试对齐 IMAP refresh 顺序与双交付日志语义
+- Cloud Mail / xAI 验证码：优先从主题解析 `SpaceXAI confirmation code: XXX-XXX`，避免 HTML/CSS 伪码（如 `PER100`）抢码
+- 协议批跑 **duplicate SSO**：curl_cffi 多域 cookie 清理 + 每轮纯 HTTP **重建 session**，避免上一号 SSO 残留
+- Docker / headless 下 SOCKS 代理改走 Chromium `--proxy-server`，补充容器启动参数与可配置启动超时
+- 单元测试对齐 IMAP refresh 顺序、cookie 清理与双交付语义
+
+### 验证结果
+
+| 项目 | 结果 |
+|------|------|
+| 协议 + Cloud Mail + 本地 Solver（仅外置） | 连续 `3/3` 成功；`transport=http turnstile=local_solver` |
+| 同配置扩展批跑 | 可达 `10/10` 成功（无 duplicate SSO / 无错误 OTP） |
+| 单轮耗时 | 约 25–30s（含 Solver ~10s） |
+| grok2api | 无 chat 权限时 probe `403`，本地 SSO 仍入库（预期行为） |
+
+### 部署说明（协议 + 本地 Solver）
+
+推荐组合（无界面注册主流程）：
+
+```text
+registration_backend=protocol
+turnstile_provider=external          # 禁止回退注册 Chrome；仍可用本地 Camoufox Solver
+turnstile_solver_url=http://127.0.0.1:5072
+browser_proxy=<与注册相同的出口>
+```
+
+说明：**本地 Solver 的 Camoufox 只解 Turnstile，不是注册浏览器。** 仅当机器完全不能运行任何浏览器二进制时，才需要 YesCaptcha 替代 Solver。
 
 ### 相关提交
 
-- `fbec93e` `fix: Docker SOCKS browser, MSA IMAP OTP, optional CPA export/pool settings`
-- `6af5b21` `test: align unit tests with CPA delivery and IMAP refresh order`
-- `1792562` `Merge pull request #12 from Elliotwu-7/fix/docker-socks-imap-cpa-export`
+- 本 tag 覆盖 `v0.3.0` 之后至发布点的协议硬化、Solver 托管、设置 UI 与交付能力
+- 含已合入主干的：`feat: add configurable registration interval`、`feat: probe grok2api chat availability`，以及 CPA/IMAP（PR #12）等
+
+## [v0.3.0] - 2026-07-17
+
+蓝白 Aurora 运维台 UI，以及此前已合入主干的协议 HTTP 注册后端与多邮箱 Provider 能力的版本锚点。
+
+- 协议 HTTP Worker（实验）、多临时邮箱 Provider
+- 结果管理 KPI / 折叠面板与设置分区
+- 详见 README「注册后端实验架构」与界面预览
 
 ## [v0.2.0] - 2026-07-15
 

@@ -27,6 +27,7 @@ from api.register import init_register_api
 from api.results import init_results_api
 from api.settings import init_settings_api
 from api.websocket import init_websocket
+from services import solver_manager
 
 # ── Logging setup ──────────────────────────────────────────
 logging.basicConfig(
@@ -116,6 +117,20 @@ def main():
     if browser_mgr.proxy:
         logger.info('Browser proxy configured: %s', redact_proxy_url(browser_mgr.proxy))
 
+    # Lifecycle B: boot local Turnstile solver when settings need it
+    # (no YesCaptcha, provider not browser-only, URL on loopback).
+    if solver_manager.should_auto_start(settings):
+        logger.info(
+            'Local Turnstile solver auto-start enabled (%s)',
+            (settings.get('turnstile_solver_url') or solver_manager.DEFAULT_SOLVER_URL),
+        )
+        solver_manager.start_async(settings)
+    else:
+        logger.info(
+            'Local Turnstile solver auto-start skipped '
+            '(YesCaptcha configured, browser-only provider, or non-local URL)'
+        )
+
     url = f'http://{"localhost" if args.host in ("127.0.0.1", "0.0.0.0") else args.host}:{args.port}'
     logger.info(f"Starting Grok Register Platform at {url}")
 
@@ -123,7 +138,13 @@ def main():
     if args.host in ('127.0.0.1', 'localhost'):
         threading.Timer(1.5, lambda: webbrowser.open(url)).start()
 
-    socketio.run(app, host=args.host, port=args.port, debug=False, allow_unsafe_werkzeug=True)
+    try:
+        socketio.run(app, host=args.host, port=args.port, debug=False, allow_unsafe_werkzeug=True)
+    finally:
+        try:
+            solver_manager.stop()
+        except Exception:
+            logger.exception('Failed to stop local Turnstile solver on shutdown')
 
 
 if __name__ == '__main__':

@@ -1,0 +1,15 @@
+# Optional deps for the vendored local Turnstile Solver
+# (services/turnstile_solver — Camoufox / Chromium HTTP API on :5072).
+#
+# Install:
+#   pip install -r requirements-solver.txt
+#   python -m camoufox fetch
+#
+# The main app (requirements.txt) stays lightweight and only talks to the
+# solver over HTTP. Without these packages the Web UI still runs; local
+# solver auto-start will report a clear error instead.
+
+quart>=0.19
+camoufox[geoip]>=0.4
+patchright>=1.0
+rich>=13.0

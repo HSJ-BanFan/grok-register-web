@@ -24,6 +24,7 @@ from core.registration.backend import (
     apply_sso_cookies,
     build_protocol_session,
     build_signup_payload,
+    clear_identity_cookies,
     follow_sso_http,
     redact_sensitive_text,
     resolve_protocol_proxy,
@@ -688,6 +689,58 @@ class ProtocolRegistrationWorker:
         try:
             self.state.check_pause()
             self._ensure_alias_lease(lease_lost_event)
+            # Each signup must start without a prior account SSO. curl_cffi cookie
+            # jars do not always honor partial clears, so rebuild a fresh session
+            # for pure-HTTP rounds (and still strip identity cookies as backup).
+            self._sso_follow_mode = 'none'
+            if self._pure_http:
+                try:
+                    prev = self._session
+                    self._session = build_protocol_session(settings)
+                    # Best-effort transplant of Cloudflare cookies only.
+                    if prev is not None:
+                        try:
+                            for cookie in list(getattr(prev, 'cookies', []) or []):
+                                name = str(getattr(cookie, 'name', '') or '')
+                                lower = name.lower()
+                                if lower in {'__cf_bm', 'cf_clearance'} or lower.startswith('cf_'):
+                                    value = getattr(cookie, 'value', None)
+                                    domain = getattr(cookie, 'domain', None) or None
+                                    path = getattr(cookie, 'path', None) or '/'
+                                    if value is None:
+                                        continue
+                                    try:
+                                        self._session.cookies.set(
+                                            name, str(value), domain=domain, path=path,
+                                        )
+                                    except Exception:
+                                        try:
+                                            self._session.cookies.set(name, str(value))
+                                        except Exception:
+                                            pass
+                        except Exception:
+                            pass
+                    logger.info('[protocol] rebuilt HTTP session before round %s', round_num)
+                except Exception as rebuild_exc:
+                    logger.warning(
+                        '[protocol] session rebuild failed (%s); falling back to cookie clear',
+                        rebuild_exc,
+                    )
+                    try:
+                        clear_identity_cookies(self._session)
+                    except Exception:
+                        pass
+            else:
+                try:
+                    cleared = clear_identity_cookies(self._session)
+                    if cleared:
+                        logger.info(
+                            '[protocol] cleared %s identity cookie(s) before round %s',
+                            cleared, round_num,
+                        )
+                except Exception as clear_exc:
+                    logger.warning('[protocol] identity cookie clear failed: %s', clear_exc)
+
             # Hybrid path only: recover page disconnects from previous navigations.
             if not self._pure_http:
                 self._ensure_browser_ready(force_reload=False)
@@ -703,6 +756,8 @@ class ProtocolRegistrationWorker:
             ):
                 try:
                     apply_cookies_to_session(self._session, self._provider._export_cookies())
+                    # Browser export may reintroduce a prior SSO; strip again.
+                    clear_identity_cookies(self._session)
                 except Exception:
                     pass
 

@@ -1848,6 +1848,18 @@ code {
     flex-direction: column;
     gap: 16px;
 }
+.backend-settings {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+.backend-settings[hidden] {
+    display: none !important;
+}
+.choice-group[aria-label="registration-backend"],
+.choice-group[aria-label="turnstile-provider"] {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+}
 .mail-provider-settings {
     margin-top: 2px;
 }
@@ -1874,6 +1886,75 @@ code {
     font-weight: 700;
     color: var(--text-muted);
     letter-spacing: 0.01em;
+}
+.solver-health-card {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 12px;
+    padding: 11px 12px;
+    border: 1px solid var(--border-strong);
+    border-radius: 12px;
+    background: var(--bg-inset-soft);
+}
+.solver-health-actions {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+}
+@media (max-width: 720px) {
+    .solver-health-card {
+        grid-template-columns: auto minmax(0, 1fr);
+    }
+    .solver-health-actions {
+        grid-column: 1 / -1;
+        justify-content: flex-start;
+    }
+}
+.solver-health-state {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    color: var(--text-secondary);
+    font-size: 12.5px;
+    font-weight: 700;
+}
+.solver-health-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    box-shadow: 0 0 0 4px rgba(100, 116, 139, 0.1);
+}
+.solver-health-detail {
+    min-width: 0;
+    color: var(--text-muted);
+    font-size: 12px;
+    line-height: 1.45;
+}
+.solver-health-card[data-state="online"] {
+    border-color: color-mix(in srgb, var(--success) 34%, var(--border-strong));
+    background: color-mix(in srgb, var(--success) 6%, var(--bg-card));
+}
+.solver-health-card[data-state="online"] .solver-health-state { color: var(--success); }
+.solver-health-card[data-state="online"] .solver-health-dot {
+    background: var(--success);
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--success) 14%, transparent);
+}
+.solver-health-card[data-state="offline"] {
+    border-color: color-mix(in srgb, var(--error) 30%, var(--border-strong));
+}
+.solver-health-card[data-state="offline"] .solver-health-state { color: var(--error); }
+.solver-health-card[data-state="offline"] .solver-health-dot {
+    background: var(--error);
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--error) 12%, transparent);
+}
+.solver-health-card[data-state="checking"] .solver-health-dot {
+    background: var(--primary);
+    box-shadow: 0 0 0 4px var(--primary-soft);
+    animation: dot-pulse 1.2s ease-in-out infinite;
 }
 .choice-group {
     display: grid;
@@ -2034,16 +2115,26 @@ code {
 @media (max-width: 860px) {
     .settings-grid,
     .settings-two-col,
-    .choice-group {
+    .choice-group,
+    .choice-group[aria-label="registration-backend"],
+    .choice-group[aria-label="turnstile-provider"] {
         grid-template-columns: 1fr;
     }
     .settings-actions {
         position: static;
     }
+    .solver-health-card {
+        grid-template-columns: auto minmax(0, 1fr);
+    }
+    .solver-health-card .btn {
+        grid-column: 1 / -1;
+        width: 100%;
+    }
 }
 @media (prefers-reduced-motion: reduce) {
     .settings-page > .card,
-    .choice-card {
+    .choice-card,
+    .solver-health-dot {
         animation: none !important;
         transition: none !important;
         transform: none !important;
