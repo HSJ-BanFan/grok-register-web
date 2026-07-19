@@ -65,6 +65,11 @@ class RegistrationState:
         self._completed = 0
         self._success = 0
         self._failed = 0
+        # Session-scoped chat probe outcomes (reset when a new RegistrationState is created).
+        self._chat_probe_passed = 0
+        self._chat_probe_denied = 0
+        self._chat_probe_failed = 0
+        self._chat_probe_skipped = 0
         self._active_workers = {}
         self._provisional_workers = set()
         self._next_round_at = None
@@ -238,6 +243,62 @@ class RegistrationState:
                 self._active_workers.pop(worker_id, None)
                 self._provisional_workers.discard(worker_id)
 
+    def record_chat_probe(self, outcome):
+        """Count one pre-upload chat probe outcome for the live dashboard.
+
+        Outcomes:
+          - passed: HTTP 2xx from cli-chat-proxy
+          - denied: 401/403 / permission denied (no chat entitlement)
+          - failed: probe ran but failed for other reasons (429 exhausted, network, …)
+          - skipped: probe disabled or not attempted
+        """
+        key = str(outcome or '').strip().lower()
+        with self._lock:
+            if key == 'passed':
+                self._chat_probe_passed += 1
+            elif key == 'denied':
+                self._chat_probe_denied += 1
+            elif key == 'failed':
+                self._chat_probe_failed += 1
+            elif key == 'skipped':
+                self._chat_probe_skipped += 1
+
+    def record_chat_probe_from_upload(self, upload_result=None, error=None):
+        """Derive probe stats from upload_registered_sso result or raised error."""
+        try:
+            from core.grok2api_client import Grok2APIChatPermissionError
+        except Exception:  # pragma: no cover - import cycle guard
+            Grok2APIChatPermissionError = type('Grok2APIChatPermissionError', (Exception,), {})
+
+        if error is not None and isinstance(error, Grok2APIChatPermissionError):
+            self.record_chat_probe('denied')
+            return
+        if error is not None:
+            # Upload failed after/around probe for a non-permission reason.
+            detail = str(error).lower()
+            if 'chat probe' in detail:
+                self.record_chat_probe('failed')
+            return
+        if not isinstance(upload_result, dict):
+            return
+        if upload_result.get('grok2api_probe_denied'):
+            self.record_chat_probe('denied')
+            return
+        probe = {}
+        grok2 = upload_result.get('grok2api')
+        if isinstance(grok2, dict) and isinstance(grok2.get('probe'), dict):
+            probe = grok2['probe']
+        elif isinstance(upload_result.get('probe'), dict):
+            probe = upload_result['probe']
+        if not probe:
+            return
+        if probe.get('skipped'):
+            self.record_chat_probe('skipped')
+        elif probe.get('ok'):
+            self.record_chat_probe('passed')
+        else:
+            self.record_chat_probe('failed')
+
     def pause(self):
         self._pause_event.clear()
         with self._lock:
@@ -310,6 +371,10 @@ class RegistrationState:
                 'completed': self._completed,
                 'success': self._success,
                 'failed': self._failed,
+                'chat_probe_passed': self._chat_probe_passed,
+                'chat_probe_denied': self._chat_probe_denied,
+                'chat_probe_failed': self._chat_probe_failed,
+                'chat_probe_skipped': self._chat_probe_skipped,
                 'next_round_at': self._next_round_at,
                 'next_round_in': self._next_round_in,
             }

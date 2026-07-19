@@ -492,9 +492,11 @@ class RegistrationEngine:
                         )
                     else:
                         self.db.finish_grok2api_upload(reg_id, True)
+                    self.state.record_chat_probe_from_upload(upload_result)
                     if upload_result is not None:
-                        imported = upload_result.get('import', {})
-                        converted = upload_result.get('conversion', {})
+                        grok2 = upload_result.get('grok2api') if isinstance(upload_result.get('grok2api'), dict) else {}
+                        imported = upload_result.get('import', {}) or grok2.get('import', {})
+                        converted = upload_result.get('conversion', {}) or grok2.get('conversion', {})
                         logger.info(
                             'grok2api auto pipeline completed: web_created=%s web_updated=%s '
                             'web_synced=%s web_sync_failed=%s build_created=%s linked=%s '
@@ -516,7 +518,10 @@ class RegistrationEngine:
                         self.db.finish_grok2api_probe(reg_id, upload_error.probe)
                     else:
                         self.db.finish_grok2api_upload(reg_id, False, upload_error)
+                    self.state.record_chat_probe_from_upload(error=upload_error)
                     logger.warning(f'grok2api auto upload failed: {upload_error}')
+            else:
+                self.state.record_chat_probe('skipped')
 
             self.state.record_success(worker_id)
             logger.info(f"Round {round_num} SUCCESS! Duration: {duration:.1f}s")

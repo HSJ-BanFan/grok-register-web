@@ -1,4 +1,5 @@
 import { renderSidebar } from './components/sidebar.js';
+import { initAboutTrigger } from './components/about.js';
 import { connectSocket } from './websocket.js';
 import * as EmailPage from './pages/email.js';
 import * as RegisterPage from './pages/register.js';
@@ -201,6 +202,7 @@ function init() {
     }
 
     initMobileNav();
+    initAboutTrigger();
     window.addEventListener('hashchange', () => {
         navigate();
     });

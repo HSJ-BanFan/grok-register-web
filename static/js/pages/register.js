@@ -73,6 +73,18 @@ export async function render(container) {
                         <span class="mini-stat-label">已失败别名</span>
                         <span class="mini-stat-val text-error">0</span>
                     </div>
+                    <div class="mini-stat-card">
+                        <span class="mini-stat-label">Chat 通过</span>
+                        <span class="mini-stat-val text-success">0</span>
+                    </div>
+                    <div class="mini-stat-card">
+                        <span class="mini-stat-label">Chat 无权限</span>
+                        <span class="mini-stat-val text-error">0</span>
+                    </div>
+                    <div class="mini-stat-card">
+                        <span class="mini-stat-label">Chat 未检/失败</span>
+                        <span class="mini-stat-val">0</span>
+                    </div>
                 </div>
             </div>
         </div>
@@ -84,6 +96,13 @@ export async function render(container) {
 
     connectSocket({
         onLog: (data) => logPanel.addLog(data),
+        onLogReplay: (data) => {
+            if (data && Array.isArray(data.entries)) {
+                for (const entry of data.entries) {
+                    logPanel.addLog(entry);
+                }
+            }
+        },
         onStatusUpdate: (data) => updateStatus(data),
         onRoundComplete: (data) => {
             if (data.success) showToast(`第 ${data.round} 轮注册成功! 耗时: ${data.duration}秒`, 'success');
@@ -212,6 +231,18 @@ function ensureStatusShell(root, labels) {
                 <span class="mini-stat-label" data-role="failed-label">${labels.failed}</span>
                 <span class="mini-stat-val text-error count-up" id="failed-count">0</span>
             </div>
+            <div class="mini-stat-card" title="上传前 chat probe 返回 2xx 的账号数（本任务会话）">
+                <span class="mini-stat-label">Chat 通过</span>
+                <span class="mini-stat-val text-success count-up" id="chat-passed">0</span>
+            </div>
+            <div class="mini-stat-card" title="chat probe 403/401 无权限的账号数（本任务会话）">
+                <span class="mini-stat-label">Chat 无权限</span>
+                <span class="mini-stat-val text-error count-up" id="chat-denied">0</span>
+            </div>
+            <div class="mini-stat-card" title="未开启 probe / 探测失败 / 未走上传的成功注册">
+                <span class="mini-stat-label">Chat 未检/失败</span>
+                <span class="mini-stat-val count-up" id="chat-other">0</span>
+            </div>
         </div>
     `;
     root.dataset.ready = '1';
@@ -249,6 +280,9 @@ function updateStatus(data) {
     const completedEl = document.getElementById('completed');
     const successEl = document.getElementById('success-count');
     const failedEl = document.getElementById('failed-count');
+    const chatPassedEl = document.getElementById('chat-passed');
+    const chatDeniedEl = document.getElementById('chat-denied');
+    const chatOtherEl = document.getElementById('chat-other');
 
     if (titleEl) titleEl.textContent = dashboardTitle;
     if (badgeEl) {
@@ -272,6 +306,17 @@ function updateStatus(data) {
     if (completedEl) countUp(completedEl, `${data.completed || 0} 轮`, { duration: 640 });
     if (successEl) countUp(successEl, data.success || 0, { duration: 640 });
     if (failedEl) countUp(failedEl, data.failed || 0, { duration: 640 });
+
+    const chatPassed = Number(data.chat_probe_passed || 0);
+    const chatDenied = Number(data.chat_probe_denied || 0);
+    const chatFailed = Number(data.chat_probe_failed || 0);
+    const chatSkipped = Number(data.chat_probe_skipped || 0);
+    // "未检/失败" = skipped + non-permission failures. Successful regs without upload
+    // do not increment probe counters (upload path only).
+    const chatOther = chatFailed + chatSkipped;
+    if (chatPassedEl) countUp(chatPassedEl, chatPassed, { duration: 640 });
+    if (chatDeniedEl) countUp(chatDeniedEl, chatDenied, { duration: 640 });
+    if (chatOtherEl) countUp(chatOtherEl, chatOther, { duration: 640 });
 
     if (data.status === 'stopped') {
         document.getElementById('start-btn').disabled = false;

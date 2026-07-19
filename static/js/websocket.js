@@ -10,6 +10,10 @@ export function connectSocket(h = {}) {
         if (handlers.onLog) handlers.onLog(data);
     });
 
+    socket.on('log_replay', (data) => {
+        if (handlers.onLogReplay) handlers.onLogReplay(data);
+    });
+
     socket.on('status_update', (data) => {
         if (handlers.onStatusUpdate) handlers.onStatusUpdate(data);
     });

@@ -60,7 +60,7 @@ export function renderSidebar(container) {
         <div class="sidebar-footer">
             <div class="sidebar-status-card">
                 <span class="status-badge success">本地控制台</span>
-                <span class="status-text">邮箱导入 · 注册任务 · SSO 导出</span>
+                <span class="status-text">邮箱 · 注册 · SSO · 交付</span>
             </div>
         </div>
     `;

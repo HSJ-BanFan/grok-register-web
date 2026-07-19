@@ -415,7 +415,8 @@ h1, h2, h3, .card-title, .stat-value, .mini-stat-val, .topbar h1 {
     align-items: center;
     gap: 10px;
 }
-.version {
+.version,
+.version-btn {
     color: var(--text-muted);
     font-size: 11px;
     padding: 3px 10px;
@@ -423,6 +424,17 @@ h1, h2, h3, .card-title, .stat-value, .mini-stat-val, .topbar h1 {
     border: 1px solid var(--border);
     border-radius: 20px;
     font-weight: 600;
+}
+.version-btn {
+    cursor: pointer;
+    transition: color 0.2s ease, border-color 0.2s ease, background 0.2s ease;
+}
+.version-btn:hover,
+.version-btn:focus-visible {
+    color: var(--primary-strong);
+    border-color: var(--border-glow-active);
+    background: var(--primary-soft);
+    outline: none;
 }
 
 /* ── Theme toggle ── */
@@ -1154,6 +1166,123 @@ h1, h2, h3, .card-title, .stat-value, .mini-stat-val, .topbar h1 {
 .toast-warning .toast-icon { color: var(--warning); }
 .toast-info .toast-icon { color: var(--primary); }
 
+/* ── About modal ── */
+#about-modal-root {
+    position: fixed;
+    inset: 0;
+    z-index: 10000;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+}
+#about-modal-root[hidden] {
+    display: none !important;
+}
+.about-scrim {
+    position: absolute;
+    inset: 0;
+    background: rgba(15, 23, 42, 0.48);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+}
+.about-dialog {
+    position: relative;
+    z-index: 1;
+    width: min(520px, calc(100vw - 32px));
+    max-height: min(86vh, 720px);
+    overflow: auto;
+    padding: 22px 22px 18px;
+    border-radius: 18px;
+    border: 1px solid var(--border-strong);
+    background: var(--bg-elevated);
+    box-shadow: var(--shadow-md);
+}
+.about-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 14px;
+}
+.about-eyebrow {
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+}
+.about-head h2 {
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+.about-close {
+    width: 32px;
+    height: 32px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--bg-hover);
+    color: var(--text-secondary);
+    font-size: 20px;
+    line-height: 1;
+    cursor: pointer;
+}
+.about-close:hover,
+.about-close:focus-visible {
+    color: var(--text-primary);
+    border-color: var(--border-strong);
+    outline: none;
+}
+.about-brand {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-bottom: 12px;
+}
+.about-brand strong {
+    font-size: 16px;
+    color: var(--text-primary);
+}
+.about-brand span {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+.about-body {
+    font-size: 13.5px;
+    line-height: 1.65;
+    color: var(--text-secondary);
+    margin-bottom: 12px;
+}
+.about-points {
+    margin: 0 0 14px;
+    padding-left: 18px;
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.7;
+}
+.about-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 16px;
+    align-items: center;
+    margin-bottom: 10px;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+.about-meta a {
+    color: var(--primary-strong);
+    text-decoration: none;
+    font-weight: 600;
+}
+.about-meta a:hover {
+    text-decoration: underline;
+}
+.about-disclaimer {
+    font-size: 12px;
+    line-height: 1.55;
+    color: var(--text-muted);
+}
 
 /* ── Foldable / collapsible panels ── */
 .fold-card {

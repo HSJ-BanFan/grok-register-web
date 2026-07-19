@@ -134,7 +134,7 @@ export async function render(container) {
                 <div class="settings-hero-main">
                     <div class="card-title">${ICONS.gear} 系统设置中心</div>
                     <p class="card-desc settings-hero-desc">
-                        配置邮箱服务、注册后端、浏览器策略、CPA 热池补号与 grok2api 流程。分区保存，后续任务立即生效。
+                        配置邮箱、注册路径、人机求解与交付后端（grok2api / CPA）。分区保存后对后续任务立即生效。
                     </p>
                 </div>
                 <div class="settings-hero-meta">
@@ -337,7 +337,7 @@ export async function render(container) {
                 </div>
             `)}
 
-            ${section(ICONS.server, 'CPA 接入与补号', '注册成功后 mint OAuth 并热载到 CLIProxyAPI；号池低于下限自动注册，达到上限自动暂停。', `
+            ${section(ICONS.server, 'CPA 接入与补号', '可选交付到 CLIProxyAPI：mint OAuth、chat 探测后热载；号池低于下限可自动补号（需外部 timer）。', `
                 <div class="settings-two-col">
                     <div class="settings-field-block">
                         <div class="settings-field-label">注册成功后导出到 CPA</div>
@@ -376,20 +376,20 @@ export async function render(container) {
                 </div>
             `)}
 
-            ${section(ICONS.upload, 'grok2api 接入', '注册成功后的自动上传、Web 激活与管理端凭证。', `
+            ${section(ICONS.upload, 'grok2api 接入', '注册成功后的可选交付：Web 导入、Build 转换、chat 探测与后台补传。', `
                 <div class="settings-two-col">
                     <div class="settings-field-block">
                         <div class="settings-field-label">注册成功后上传到 grok2api</div>
                         ${choiceGroup('grok2api-upload', [
                             { value: 'false', title: '不自动上传', desc: '仅本地保存结果，手动处理。', recommend: true },
-                            { value: 'true', title: '自动导入 Web 并转换 Build', desc: '成功后直接推到 grok2api。' },
+                            { value: 'true', title: '自动导入 Web 并转换 Build', desc: '导入 Web SSO 并转换 Build；瞬时失败会自动重试并后台补传。' },
                         ], grok2apiUpload)}
                     </div>
                     <div class="settings-field-block">
                         <div class="settings-field-label">Chat 可用性探测</div>
                         ${choiceGroup('grok2api-probe', [
                             { value: 'false', title: '关闭', desc: '保持原上传流程，不额外等待。', recommend: true },
-                            { value: 'true', title: '开启 probe', desc: '上传前 mint Build 凭证并测试 chat；无权限账号不导入。' },
+                            { value: 'true', title: '开启 probe', desc: '上传前探测 chat。无权限/限流时跳过导入，本地仍保留 SSO。' },
                         ], grok2apiProbe)}
                     </div>
                 </div>

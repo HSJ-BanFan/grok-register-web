@@ -6,7 +6,19 @@
 
 ## [Unreleased]
 
-（暂无）
+### 文档
+
+- 同步「协议注册已可稳定长跑」定位：README 默认路径改为协议 + 本地 Solver
+- 补充注册成功 / 上传失败 / durable 补传的判读说明
+- 补充 grok2api 出口节点缺失、Device OAuth 限流等交付类错误
+- 刷新产品描述（含 grok2api 与 CPA）与 meta / 侧栏状态文案
+- 拆分文档：`docs/USAGE.md`、`docs/CONFIGURATION.md`、`docs/TROUBLESHOOTING.md`；README 改为概览 + 快速开始 + 索引
+
+### UI 文案
+
+- 设置页交付说明对齐当前能力（补传、chat probe）
+- 顶栏版本号与 CHANGELOG 对齐为 `v0.4.0`
+- 点击顶栏版本号打开「关于」弹窗（方案 A 正文 + CPA）
 
 ## [v0.4.0] - 2026-07-18
 
