@@ -80,7 +80,7 @@
 | 键 / 设置 | 含义 | 默认 |
 |-----------|------|------|
 | `cpa_auto_export` | 注册成功后导出到 CPA | 关 |
-| `cpa_probe_chat` | mint 后 chat probe（须 2xx 且响应 `model` 为 `grok-4.5*-build-free`） | 开（开启 CPA 时建议保持） |
+| `cpa_probe_chat` | mint 后 chat probe（硬门：HTTP 2xx；`model=grok-4.5*-build-free` 仅软标记） | 开（开启 CPA 时建议保持） |
 | `cpa_auth_dir` | 热池目录 | `/cpa/auths` |
 | `cpa_dead_dir` | chat 失败归档 | `/cpa/auths-chat-dead` |
 | `cpa_proxy` | mint/probe 代理；空则回落 `browser_proxy` | 空 |

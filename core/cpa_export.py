@@ -155,24 +155,31 @@ def is_accepted_chat_model(model: str | None) -> bool:
 def evaluate_chat_probe_response(status_code: int, body_text: str | None) -> dict[str, Any]:
     """Classify a chat completion response for pre-upload gating.
 
-    Pass only when:
-    1. HTTP status is 2xx (chat permission works)
-    2. JSON body has a model field matching grok-4.5*-build-free
+    Upload gate (`ok`) only requires chat permission (HTTP 2xx).
+    The response `model` field is a soft quality signal (`model_ok`):
+    unexpected / missing model is recorded but must not block delivery,
+    because transient parse/network edge cases still usually mean a usable account.
     """
     text = body_text or ''
+    status = int(status_code or 0)
     result: dict[str, Any] = {
         'ok': False,
-        'status': int(status_code or 0),
+        'status': status,
         'model': '',
+        'model_ok': False,
         'classification': 'chat_probe_failed',
-        'body': text[:500] if 200 <= int(status_code or 0) < 300 else None,
-        'error': None if 200 <= int(status_code or 0) < 300 else text[:500],
+        'body': text[:500] if 200 <= status < 300 else None,
+        'error': None if 200 <= status < 300 else text[:500],
     }
-    if not (200 <= result['status'] < 300):
+    if not (200 <= status < 300):
         detail = (text or '').lower()
-        if result['status'] in (401, 403) or 'permission' in detail or 'denied' in detail:
+        if status in (401, 403) or 'permission' in detail or 'denied' in detail:
             result['classification'] = 'chat_permission_denied'
         return result
+
+    # HTTP 2xx means chat permission works → allow upload.
+    result['ok'] = True
+    result['error'] = None
 
     try:
         data = json.loads(text) if text else {}
@@ -189,11 +196,12 @@ def evaluate_chat_probe_response(status_code: int, body_text: str | None) -> dic
     model = str(data.get('model') or '').strip()
     result['model'] = model
     if is_accepted_chat_model(model):
-        result['ok'] = True
-        result['error'] = None
+        result['model_ok'] = True
         result['classification'] = 'chat_allowed_free'
         return result
 
+    # Soft fail: keep ok=True so upload still proceeds.
+    result['model_ok'] = False
     result['error'] = f'unexpected model: {model or "<empty>"}'
     result['classification'] = 'unexpected_model'
     return result
@@ -217,6 +225,7 @@ def probe_chat(access_token: str, *, proxy: str | None = None, timeout: float = 
         'ok': False,
         'status': 0,
         'model': '',
+        'model_ok': False,
         'classification': 'chat_probe_failed',
         'error': 'no attempt',
     }
@@ -233,11 +242,12 @@ def probe_chat(access_token: str, *, proxy: str | None = None, timeout: float = 
             last['proxy'] = label
             if last.get('ok'):
                 logger.info(
-                    'CPA chat probe via %s: status=%s model=%s classification=%s',
-                    label, last.get('status'), last.get('model'), last.get('classification'),
+                    'CPA chat probe via %s: status=%s model=%s model_ok=%s classification=%s',
+                    label, last.get('status'), last.get('model'),
+                    last.get('model_ok'), last.get('classification'),
                 )
                 return last
-            # hard permission-denied / wrong model: still try other egress once
+            # hard permission-denied / transport failure: try other egress once
             logger.info(
                 'CPA chat probe via %s: status=%s model=%s classification=%s error=%s',
                 label, last.get('status'), last.get('model'),
@@ -248,6 +258,7 @@ def probe_chat(access_token: str, *, proxy: str | None = None, timeout: float = 
                 'ok': False,
                 'status': 0,
                 'model': '',
+                'model_ok': False,
                 'classification': 'chat_probe_failed',
                 'error': str(e),
                 'proxy': label,
@@ -273,20 +284,21 @@ def probe_chat_with_retries(
         'ok': False,
         'status': 0,
         'model': '',
+        'model_ok': False,
         'classification': 'chat_probe_failed',
         'error': 'not attempted',
     }
     for i in range(attempts):
         last = probe_chat(access_token, proxy=proxy)
         logger.info(
-            'CPA chat probe attempt %s/%s: ok=%s status=%s model=%s classification=%s proxy=%s',
+            'CPA chat probe attempt %s/%s: ok=%s status=%s model=%s model_ok=%s classification=%s proxy=%s',
             i + 1, attempts, last.get('ok'), last.get('status'),
-            last.get('model'), last.get('classification'), last.get('proxy'),
+            last.get('model'), last.get('model_ok'), last.get('classification'), last.get('proxy'),
         )
         if last.get('ok'):
             return last
-        # Wrong model is a hard quality gate; retries rarely change the model id.
-        if last.get('classification') == 'unexpected_model':
+        # Hard permission denial rarely flips after waiting; stop early.
+        if last.get('classification') == 'chat_permission_denied':
             return last
         if i + 1 < attempts and retry_gap_sec > 0:
             logger.info('CPA chat probe retry sleep %.0fs', retry_gap_sec)

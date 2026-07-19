@@ -21,7 +21,7 @@
 | `grok2api auto upload failed` | 即时交付失败 | 出号仍成功 |
 | `Build conversion reported failed=1; retrying once` | 转换瞬时失败，重试中 | 看下一行 |
 | `durable retry completed` | 补传成功 | 交付最终成功 |
-| `chat probe passed` | 可 chat 且 `model` 为 `grok-4.5*-build-free` | 号池质量 OK |
+| `chat probe passed` | chat 可用；`model=grok-4.5*-build-free` 时 model_ok | 号池质量 OK |
 
 ---
 
@@ -77,8 +77,8 @@
 | `device?error=rate_limited` / `slow_down` | Device OAuth 限流 | 降并发/加间隔；依赖补传 |
 | `resource-exhausted` / chat 429 | 上游模型拥塞 | 与注册无关；稍后 probe |
 | `grok2api chat probe permission denied: HTTP 403` | 无 chat 权限 | **注册仍成功**；有权限后再上传 |
-| `CPA chat probe failed` / 进 `cpa_dead_dir` | mint 成功但 chat 暂不可用 / model 不符 | 勿当热池号；延迟重试或回捞 |
-| `unexpected model: ...` | HTTP 200 但响应 model 不是 `grok-4.5*-build-free` | 拒上传；检查上游是否改了 free 模型命名 |
+| `CPA chat probe failed` / 进 `cpa_dead_dir` | mint 成功但 chat 权限不可用 | 勿当热池号；延迟重试或回捞 |
+| `unexpected model: ...` | HTTP 200 但响应 model 不是 `grok-4.5*-build-free` | **仍上传**；仅软告警，不拦截交付 |
 
 即时转换失败但 `Round SUCCESS`：**不要重注册**。
 

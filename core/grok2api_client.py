@@ -429,22 +429,31 @@ def upload_registered_sso(settings, sso_cookie, email='', user_agent='', cloudfl
                 status = int(probe.get('status') or 0)
                 detail = str(probe.get('error') or '').lower()
                 classification = str(probe.get('classification') or '')
+                # Only hard chat-permission failures block upload.
+                # Model-field mismatch is soft and never reaches here (ok stays true).
                 if (
                     status in (401, 403)
-                    or classification in ('chat_permission_denied', 'unexpected_model')
+                    or classification == 'chat_permission_denied'
                     or 'permission' in detail
                     or 'denied' in detail
-                    or 'unexpected model' in detail
                 ):
                     raise Grok2APIChatPermissionError(probe)
                 raise Grok2APIError(
                     f'grok2api chat probe failed: HTTP {status}: '
                     f'{probe.get("error") or "unknown error"}'
                 )
-            logger.info(
-                'grok2api pre-upload chat probe passed: account=%s model=%s',
-                email or '(unnamed)', probe.get('model') or '',
-            )
+            if probe.get('model_ok') is False and not probe.get('skipped'):
+                logger.warning(
+                    'grok2api pre-upload chat probe model soft-fail, still uploading: '
+                    'account=%s model=%s classification=%s error=%s',
+                    email or '(unnamed)', probe.get('model') or '',
+                    probe.get('classification') or '', (probe.get('error') or '')[:160],
+                )
+            else:
+                logger.info(
+                    'grok2api pre-upload chat probe passed: account=%s model=%s model_ok=%s',
+                    email or '(unnamed)', probe.get('model') or '', probe.get('model_ok'),
+                )
         result['grok2api'] = client.import_web_sso_and_convert(sso_cookie, email=email)
         result['grok2api']['probe'] = probe
     except Exception as exc:
