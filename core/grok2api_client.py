@@ -370,37 +370,92 @@ class Grok2APIClient:
         return result.json().get('data', {})
 
 
-def upload_registered_sso(settings, sso_cookie, email='', user_agent='', cloudflare_cookies=''):
+def upload_registered_sso(
+    settings,
+    sso_cookie,
+    email='',
+    user_agent='',
+    cloudflare_cookies='',
+    only=None,
+):
     """Deliver a successful registration to optional backends.
 
     - CPA (CLIProxyAPI) hotload when ``cpa_auto_export`` is true.
+    - Sub2API SSO import when ``sub2api_auto_upload`` is true.
     - grok2api Web import + Build convert when ``grok2api_auto_upload`` is true.
-    Either path may run alone; failures on an enabled path raise so durable retry can re-run.
+
+    ``only`` may be ``'cpa'``, ``'sub2api'``, or ``'grok2api'`` to run a single
+    backend (used by durable retry workers). When omitted, all enabled backends
+    run. Primary backends (CPA / Sub2API) and grok2api keep independent errors;
+    if at least one enabled backend succeeds, secondary failures are recorded on
+    the result instead of raising. A targeted ``only`` run always raises on failure.
     """
     result = {}
+    only_key = (only or '').strip().lower() or None
+    if only_key and only_key not in {'cpa', 'sub2api', 'grok2api'}:
+        raise Grok2APIError(f'unsupported delivery backend filter: {only}')
+
     cpa_enabled = (settings.get('cpa_auto_export') or 'false').lower() == 'true'
+    sub2_enabled = (settings.get('sub2api_auto_upload') or 'false').lower() == 'true'
     grok_enabled = (settings.get('grok2api_auto_upload') or 'false').lower() == 'true'
 
-    if cpa_enabled:
+    run_cpa = cpa_enabled and only_key in (None, 'cpa')
+    run_sub2 = sub2_enabled and only_key in (None, 'sub2api')
+    run_grok = grok_enabled and only_key in (None, 'grok2api')
+
+    if not run_cpa and not run_sub2 and not run_grok:
+        if only_key:
+            raise Grok2APIError(f'delivery backend {only_key} is not enabled')
+        logger.info(
+            'No delivery backend enabled '
+            '(cpa_auto_export / sub2api_auto_upload / grok2api_auto_upload)'
+        )
+        return None
+
+    primary_ok = False
+    first_error = None
+
+    if run_cpa:
         try:
             from core.cpa_export import export_sso_to_cpa
             result['cpa'] = export_sso_to_cpa(settings, sso_cookie, email=email)
+            primary_ok = True
         except Exception as exc:
-            raise Grok2APIError(f'CPA export failed: {exc}') from exc
+            result['cpa_error'] = str(exc)
+            first_error = first_error or Grok2APIError(f'CPA export failed: {exc}')
+            if only_key == 'cpa':
+                raise first_error from exc
+            logger.warning('CPA export failed: %s', exc)
 
-    if not grok_enabled:
-        if not cpa_enabled:
-            logger.info('No delivery backend enabled (cpa_auto_export / grok2api_auto_upload)')
+    if run_sub2:
+        try:
+            from core.sub2api_client import export_sso_to_sub2api
+            result['sub2api'] = export_sso_to_sub2api(settings, sso_cookie, email=email)
+            primary_ok = True
+        except Exception as exc:
+            result['sub2api_error'] = str(exc)
+            first_error = first_error or Grok2APIError(f'Sub2API import failed: {exc}')
+            if only_key == 'sub2api':
+                raise first_error from exc
+            logger.warning('Sub2API import failed: %s', exc)
+
+    if not run_grok:
+        if first_error and not primary_ok:
+            raise first_error
         return result if result else None
 
     base_url = settings.get('grok2api_url', '').strip()
     username = settings.get('grok2api_username', '').strip()
     password = settings.get('grok2api_password', '')
     if not base_url or not username or not password:
-        if cpa_enabled:
-            logger.warning('grok2api enabled but incomplete credentials; CPA-only')
+        msg = 'grok2api auto upload is enabled but URL/username/password is incomplete'
+        if primary_ok:
+            logger.warning('%s; keeping primary delivery results', msg)
+            result['grok2api_error'] = msg
             return result
-        raise Grok2APIError('grok2api auto upload is enabled but URL/username/password is incomplete')
+        if first_error:
+            raise first_error
+        raise Grok2APIError(msg)
 
     client = Grok2APIClient(base_url, username, password)
     logger.info('grok2api auto pipeline started: account=%s endpoint=%s', email or '(unnamed)', base_url)
@@ -463,15 +518,19 @@ def upload_registered_sso(settings, sso_cookie, email='', user_agent='', cloudfl
                 exc.probe = dict(probe or {})
             except Exception:
                 pass
-        if cpa_enabled:
-            # CPA already succeeded; do not fail the whole delivery on secondary backend.
-            logger.warning('grok2api pipeline failed after CPA export (ignored): %s', exc)
+        if primary_ok and only_key is None:
+            # Primary delivery already succeeded; do not fail the whole fan-out.
+            logger.warning('grok2api pipeline failed after primary delivery (ignored): %s', exc)
             if isinstance(exc, Grok2APIChatPermissionError):
                 result['grok2api_probe_denied'] = exc.probe
             elif isinstance(probe, dict) and probe.get('ok') and not probe.get('skipped'):
-                # Preserve successful probe when only Web/Build delivery failed.
                 result['grok2api'] = {'probe': probe}
             result['grok2api_error'] = str(exc)
             return result
+        if first_error and only_key is None and not primary_ok:
+            # Prefer the earlier primary error if grok2api also failed alone.
+            raise first_error
         raise
+    if first_error and not primary_ok and 'grok2api' not in result:
+        raise first_error
     return result

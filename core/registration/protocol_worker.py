@@ -918,10 +918,15 @@ class ProtocolRegistrationWorker:
 
             duration = time.time() - start_time
             grok2api_enabled = settings.get('grok2api_auto_upload', 'false') == 'true'
+            sub2api_enabled = settings.get('sub2api_auto_upload', 'false') == 'true'
+            delivery_enabled = grok2api_enabled or sub2api_enabled or (
+                settings.get('cpa_auto_export', 'false') == 'true'
+            )
             self._ensure_alias_lease(lease_lost_event)
             completion = self.db.complete_registration_success(
                 reg_id, alias['id'], lease_owner, sso, duration=duration,
                 grok2api_pending=grok2api_enabled,
+                sub2api_pending=sub2api_enabled,
             )
             success_committed = True
 
@@ -932,8 +937,10 @@ class ProtocolRegistrationWorker:
             except Exception as init_exc:
                 logger.warning('[protocol] post-success init failed: %s', init_exc)
 
-            if grok2api_enabled:
-                self._upload_grok2api(settings, sso, alias_email, reg_id)
+            if delivery_enabled:
+                self._upload_delivery(settings, sso, alias_email, reg_id,
+                                      grok2api_enabled=grok2api_enabled,
+                                      sub2api_enabled=sub2api_enabled)
             else:
                 self.state.record_chat_probe('skipped', reg_id=reg_id)
 
@@ -985,38 +992,81 @@ class ProtocolRegistrationWorker:
                 max_retries, round_num, worker_id, alias_email,
             )
 
-    def _upload_grok2api(self, settings, sso, alias_email, reg_id):
-        """Run the optional upload pipeline while preserving durable retry state."""
-        self.db.begin_grok2api_upload(reg_id)
+    def _upload_delivery(self, settings, sso, alias_email, reg_id,
+                         grok2api_enabled=False, sub2api_enabled=False):
+        """Run optional delivery backends while preserving durable retry state."""
+        if grok2api_enabled:
+            self.db.begin_grok2api_upload(reg_id)
+        if sub2api_enabled:
+            self.db.begin_sub2api_upload(reg_id)
         try:
             upload_result = upload_registered_sso(
                 settings, sso, email=alias_email,
                 user_agent='',
                 cloudflare_cookies='',
             )
-            if isinstance(upload_result, dict) and upload_result.get('grok2api_probe_denied'):
-                self.db.finish_grok2api_probe(
-                    reg_id, upload_result['grok2api_probe_denied'],
-                )
-            else:
-                self.db.finish_grok2api_upload(reg_id, True)
+            self._apply_delivery_result(
+                reg_id, upload_result,
+                grok2api_enabled=grok2api_enabled,
+                sub2api_enabled=sub2api_enabled,
+            )
             self.state.record_chat_probe_from_upload(upload_result, reg_id=reg_id)
             if upload_result is not None:
                 imported = upload_result.get('import', {}) or upload_result.get('grok2api', {}).get('import', {})
                 converted = upload_result.get('conversion', {}) or upload_result.get('grok2api', {}).get('conversion', {})
+                sub2 = upload_result.get('sub2api') if isinstance(upload_result.get('sub2api'), dict) else {}
                 logger.info(
-                    '[protocol] grok2api auto pipeline completed: '
-                    'web_created=%s build_created=%s',
+                    '[protocol] delivery pipeline completed: '
+                    'web_created=%s build_created=%s sub2api_account=%s',
                     imported.get('created', 0),
                     converted.get('created', 0),
+                    sub2.get('account_id') or '',
                 )
         except Exception as upload_error:
+            self._apply_delivery_error(
+                reg_id, upload_error,
+                grok2api_enabled=grok2api_enabled,
+                sub2api_enabled=sub2api_enabled,
+            )
+            self.state.record_chat_probe_from_upload(error=upload_error, reg_id=reg_id)
+            logger.warning('[protocol] delivery auto upload failed: %s', upload_error)
+
+    def _apply_delivery_result(self, reg_id, upload_result,
+                               grok2api_enabled=False, sub2api_enabled=False):
+        upload_result = upload_result if isinstance(upload_result, dict) else {}
+        if grok2api_enabled:
+            if upload_result.get('grok2api_probe_denied'):
+                self.db.finish_grok2api_probe(
+                    reg_id, upload_result['grok2api_probe_denied'],
+                )
+            elif upload_result.get('grok2api_error'):
+                self.db.finish_grok2api_upload(
+                    reg_id, False, upload_result['grok2api_error'],
+                )
+            else:
+                self.db.finish_grok2api_upload(reg_id, True)
+        if sub2api_enabled:
+            if upload_result.get('sub2api_error'):
+                self.db.finish_sub2api_upload(
+                    reg_id, False, upload_result['sub2api_error'],
+                )
+            elif upload_result.get('sub2api'):
+                self.db.finish_sub2api_upload(reg_id, True)
+            else:
+                self.db.finish_sub2api_upload(
+                    reg_id, False, 'sub2api result missing from delivery response',
+                )
+
+    def _apply_delivery_error(self, reg_id, upload_error,
+                              grok2api_enabled=False, sub2api_enabled=False):
+        detail = str(upload_error)
+        if grok2api_enabled:
             if isinstance(upload_error, Grok2APIChatPermissionError):
                 self.db.finish_grok2api_probe(reg_id, upload_error.probe)
             else:
                 self.db.finish_grok2api_upload(reg_id, False, upload_error)
-            self.state.record_chat_probe_from_upload(error=upload_error, reg_id=reg_id)
-            logger.warning('[protocol] grok2api auto upload failed: %s', upload_error)
+        if sub2api_enabled:
+            self.db.finish_sub2api_upload(reg_id, False, detail)
 
     def _handle_round_failure(self, exc, error_msg, duration, reg_id, alias,
                               lease_owner, max_retries, round_num, worker_id,

@@ -21,6 +21,17 @@
 - 顶栏版本号与 CHANGELOG 对齐为 `v0.4.0`
 - 点击顶栏版本号打开「关于」弹窗（方案 A 正文 + CPA）
 
+### Sub2API 交付接入（设计 D9）
+
+- **第三个可选交付后端**：注册成功后可把 SSO 原文推送到 Sub2API（≥v0.1.162）的 `POST /api/v1/admin/grok/sso-to-oauth`，由其完成 mint + 建号
+- 默认关闭；用户需在设置页开启 `sub2api_auto_upload` 才生效
+- 设置页增加 Sub2API 分区（13 个字段：URL / 邮箱密码 / API Token / Group IDs / Proxy ID / 并发 / 优先级 / 名前缀 / 超时 / 过期自动暂停 等）与「测试连接」按钮（调 `/api/settings/sub2api/test`，未保存的表单值也可携带）
+- `core/sub2api_client.py` ：跨实例 JWT 缓存（带锁）、API Token 优先于邮箱密码、3 worker 固定并发、`_unwrap_envelope` 统一处理 `{code, message, data}` 信封、`normalize_base_url` 剥 `/api` 和 `/api/v1` 后缀
+- durable 补传：`core.register` 在 round 成功后调 `begin_sub2api_upload`（独占 claim）→ `export_sso_to_sub2api` → `finish_sub2api_upload`；失败记录 `sub2api_error`，后台 `claim_sub2api_retries` 按 `retry_delay_seconds` 选可重试行重试
+- DB schema：`registrations` 表新增 `sub2api_status / sub2api_error / sub2api_attempts / sub2api_updated_at` 列；状态值 `'' / uploading / success / failed`
+- 结果页「SSO Token」表新增 **Sub2API 状态列**：徽章展示 未启用 / 已跳过 / 推送中 / 已交付 / 失败（失败状态下 hover 看错误）
+- 单测 `tests/test_sub2api_client.py`：26/26 通过覆盖 `normalize_base_url`、`parse_group_ids`、`export_sso_to_sub2api`（禁用 / 缺凭据 / 正常 / API Token 路径 / 部分失败 / 空 created / proxy_id / name prefix）、`test_sub2api_connection`（缺 URL / 缺凭据 / 登录 OK / dict envelope / HTTP 错误）、token 缓存
+
 ## [v0.4.0] - 2026-07-18
 
 本版本把 **协议注册 + 本地 Camoufox Turnstile Solver** 收成可部署能力：Solver 入库托管、OTP/SSO 批跑稳定性、设置页按路径显隐，并纳入 CPA / IMAP 交付与注册节奏控制。
