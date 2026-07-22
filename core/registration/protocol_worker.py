@@ -918,10 +918,14 @@ class ProtocolRegistrationWorker:
 
             duration = time.time() - start_time
             grok2api_enabled = settings.get('grok2api_auto_upload', 'false') == 'true'
+            sub2api_enabled = settings.get('sub2api_auto_upload', 'false') == 'true'
+            cpa_enabled = settings.get('cpa_auto_export', 'false') == 'true'
+            delivery_enabled = grok2api_enabled or sub2api_enabled or cpa_enabled
             self._ensure_alias_lease(lease_lost_event)
             completion = self.db.complete_registration_success(
                 reg_id, alias['id'], lease_owner, sso, duration=duration,
-                grok2api_pending=grok2api_enabled,
+                # Durable retry re-runs the full delivery pipeline (incl. sub2api).
+                grok2api_pending=delivery_enabled,
             )
             success_committed = True
 
@@ -932,7 +936,7 @@ class ProtocolRegistrationWorker:
             except Exception as init_exc:
                 logger.warning('[protocol] post-success init failed: %s', init_exc)
 
-            if grok2api_enabled:
+            if delivery_enabled:
                 self._upload_grok2api(settings, sso, alias_email, reg_id)
             else:
                 self.state.record_chat_probe('skipped', reg_id=reg_id)
@@ -986,7 +990,7 @@ class ProtocolRegistrationWorker:
             )
 
     def _upload_grok2api(self, settings, sso, alias_email, reg_id):
-        """Run the optional upload pipeline while preserving durable retry state."""
+        """Run optional delivery (grok2api / CPA / sub2api) with durable retry state."""
         self.db.begin_grok2api_upload(reg_id)
         try:
             upload_result = upload_registered_sso(
@@ -1004,11 +1008,14 @@ class ProtocolRegistrationWorker:
             if upload_result is not None:
                 imported = upload_result.get('import', {}) or upload_result.get('grok2api', {}).get('import', {})
                 converted = upload_result.get('conversion', {}) or upload_result.get('grok2api', {}).get('conversion', {})
+                sub2 = upload_result.get('sub2api') if isinstance(upload_result.get('sub2api'), dict) else {}
                 logger.info(
-                    '[protocol] grok2api auto pipeline completed: '
-                    'web_created=%s build_created=%s',
+                    '[protocol] delivery auto pipeline completed: '
+                    'web_created=%s build_created=%s sub2api_id=%s sub2api_name=%s',
                     imported.get('created', 0),
                     converted.get('created', 0),
+                    sub2.get('account_id'),
+                    sub2.get('name'),
                 )
         except Exception as upload_error:
             if isinstance(upload_error, Grok2APIChatPermissionError):
@@ -1016,7 +1023,7 @@ class ProtocolRegistrationWorker:
             else:
                 self.db.finish_grok2api_upload(reg_id, False, upload_error)
             self.state.record_chat_probe_from_upload(error=upload_error, reg_id=reg_id)
-            logger.warning('[protocol] grok2api auto upload failed: %s', upload_error)
+            logger.warning('[protocol] delivery auto upload failed: %s', upload_error)
 
     def _handle_round_failure(self, exc, error_msg, duration, reg_id, alias,
                               lease_owner, max_retries, round_num, worker_id,

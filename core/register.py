@@ -465,13 +465,17 @@ class RegistrationEngine:
             # 9. Save results — SSO already in hand, mark success first
             duration = time.time() - start_time
             grok2api_enabled = settings.get('grok2api_auto_upload', 'false') == 'true'
+            sub2api_enabled = settings.get('sub2api_auto_upload', 'false') == 'true'
+            cpa_enabled = settings.get('cpa_auto_export', 'false') == 'true'
+            delivery_enabled = grok2api_enabled or sub2api_enabled or cpa_enabled
             completion = self.db.complete_registration_success(
                 reg_id, alias['id'], lease_owner, sso, duration=duration,
-                grok2api_pending=grok2api_enabled,
+                # Durable retry worker re-runs upload_registered_sso (all backends).
+                grok2api_pending=delivery_enabled,
             )
             success_committed = True
 
-            if grok2api_enabled:
+            if delivery_enabled:
                 self.db.begin_grok2api_upload(reg_id)
                 try:
                     upload_context = self._cloudflare_context
@@ -497,10 +501,12 @@ class RegistrationEngine:
                         grok2 = upload_result.get('grok2api') if isinstance(upload_result.get('grok2api'), dict) else {}
                         imported = upload_result.get('import', {}) or grok2.get('import', {})
                         converted = upload_result.get('conversion', {}) or grok2.get('conversion', {})
+                        sub2 = upload_result.get('sub2api') if isinstance(upload_result.get('sub2api'), dict) else {}
                         logger.info(
-                            'grok2api auto pipeline completed: web_created=%s web_updated=%s '
+                            'delivery auto pipeline completed: web_created=%s web_updated=%s '
                             'web_synced=%s web_sync_failed=%s build_created=%s linked=%s '
-                            'skipped=%s failed=%s build_synced=%s build_sync_failed=%s',
+                            'skipped=%s failed=%s build_synced=%s build_sync_failed=%s '
+                            'sub2api_id=%s sub2api_name=%s',
                             imported.get('created', 0),
                             imported.get('updated', 0),
                             imported.get('synced', 0),
@@ -511,6 +517,8 @@ class RegistrationEngine:
                             converted.get('failed', 0),
                             converted.get('synced', 0),
                             converted.get('syncFailed', 0),
+                            sub2.get('account_id'),
+                            sub2.get('name'),
                         )
                 except Exception as upload_error:
                     from core.grok2api_client import Grok2APIChatPermissionError
@@ -519,7 +527,7 @@ class RegistrationEngine:
                     else:
                         self.db.finish_grok2api_upload(reg_id, False, upload_error)
                     self.state.record_chat_probe_from_upload(error=upload_error, reg_id=reg_id)
-                    logger.warning(f'grok2api auto upload failed: {upload_error}')
+                    logger.warning(f'delivery auto upload failed: {upload_error}')
             else:
                 self.state.record_chat_probe('skipped', reg_id=reg_id)
 

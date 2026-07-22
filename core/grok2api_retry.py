@@ -62,7 +62,13 @@ class Grok2APIRetryWorker:
 
     def run_once(self):
         settings = self.db.get_settings()
-        if settings.get('grok2api_auto_upload', 'false') != 'true':
+        # Re-run full delivery pipeline when any backend is enabled.
+        delivery_enabled = (
+            settings.get('grok2api_auto_upload', 'false') == 'true'
+            or settings.get('sub2api_auto_upload', 'false') == 'true'
+            or settings.get('cpa_auto_export', 'false') == 'true'
+        )
+        if not delivery_enabled:
             return 0
         records = self.db.claim_grok2api_retries(limit=20)
         completed = 0
@@ -81,7 +87,7 @@ class Grok2APIRetryWorker:
                     self.db.finish_grok2api_upload(reg_id, False, exc)
                 self._record_and_emit(reg_id, error=exc)
                 logger.warning(
-                    'grok2api durable retry failed: registration_id=%s error=%s',
+                    'delivery durable retry failed: registration_id=%s error=%s',
                     reg_id, exc,
                 )
             else:
@@ -95,7 +101,7 @@ class Grok2APIRetryWorker:
                     completed += 1
                     self._record_and_emit(reg_id, upload_result=result)
                     logger.info(
-                        'grok2api durable retry completed: registration_id=%s',
+                        'delivery durable retry completed: registration_id=%s',
                         reg_id,
                     )
         return completed

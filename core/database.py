@@ -81,6 +81,12 @@ DEFAULT_SETTINGS = {
     'grok2api_url': 'http://127.0.0.1:21434',
     'grok2api_username': 'admin',
     'grok2api_password': '',
+    # sub2api (remote account pool) delivery — SSO → Device Flow → single account create
+    'sub2api_auto_upload': 'false',
+    'sub2api_url': 'https://ai.woa.qzz.io',
+    'sub2api_api_key': '',
+    'sub2api_group_id': '12',
+    'sub2api_proxy_id': '',
     # Default OFF: opening grok.com after every register triggers managed CF
     # challenges that cannot be fully auto-solved. Upload/Build convert still work
     # without browser CF cookies. Use batch reactivation when CF context is needed.

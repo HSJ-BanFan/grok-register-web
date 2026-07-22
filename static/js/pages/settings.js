@@ -122,6 +122,7 @@ export async function render(container) {
     const passwordMode = s.password_mode === 'manual' ? 'manual' : 'auto';
     const grok2apiUpload = s.grok2api_auto_upload === 'true' ? 'true' : 'false';
     const grok2apiProbe = s.grok2api_probe_chat === 'true' ? 'true' : 'false';
+    const sub2apiUpload = s.sub2api_auto_upload === 'true' ? 'true' : 'false';
     const cpaAuto = s.cpa_auto_export === 'true' ? 'true' : 'false';
     const cpaProbe = s.cpa_probe_chat === 'false' ? 'false' : 'true';
     const cpaPool = s.cpa_pool_enabled === 'true' ? 'true' : 'false';
@@ -134,7 +135,7 @@ export async function render(container) {
                 <div class="settings-hero-main">
                     <div class="card-title">${ICONS.gear} 系统设置中心</div>
                     <p class="card-desc settings-hero-desc">
-                        配置邮箱、注册路径、人机求解与交付后端（grok2api / CPA）。分区保存后对后续任务立即生效。
+                        配置邮箱、注册路径、人机求解与交付后端（grok2api / CPA / sub2api）。分区保存后对后续任务立即生效。
                     </p>
                 </div>
                 <div class="settings-hero-meta">
@@ -409,6 +410,22 @@ export async function render(container) {
                         { value: 'true', title: '开启', desc: '仅浏览器注册路径生效，可能需要人工验证。' },
                     ], webActivation)}
                     <div class="helper-text">协议路径使用 HTTP 完成 TOS/生日；此开关不会改变协议流程。</div>
+                </div>
+            `)}
+
+            ${section(ICONS.server, 'sub2api 接入', '注册成功后自动：SSO → Device Flow OAuth → 单条写入 sub2api（platform=grok）。可与 CPA / grok2api 并行。', `
+                <div class="settings-field-block">
+                    <div class="settings-field-label">注册成功后自动导入 sub2api</div>
+                    ${choiceGroup('sub2api-upload', [
+                        { value: 'false', title: '不自动导入', desc: '仅本地保存 SSO，到 web-server 手动粘贴。', recommend: true },
+                        { value: 'true', title: '自动单条导入', desc: '每注册成功 1 个账号就立刻 mint OAuth 并写入目标分组。失败进后台补传。' },
+                    ], sub2apiUpload)}
+                </div>
+                <div class="settings-grid">
+                    ${field('s-sub2api-url', 'sub2api 地址', s.sub2api_url || 'https://ai.woa.qzz.io', { type: 'text', mono: true, helper: '需 Admin API Key；Cloudflare 站点用 curl 指纹访问。' })}
+                    ${field('s-sub2api-api-key', 'Admin API Key (x-api-key)', s.sub2api_api_key || '', { type: 'password', mono: true })}
+                    ${field('s-sub2api-group-id', '目标分组 ID', s.sub2api_group_id || '12', { min: 1, helper: 'Grok 平台分组，例如「自建Grok」的数字 ID。' })}
+                    ${field('s-sub2api-proxy-id', '代理 ID（可选）', s.sub2api_proxy_id || '', { type: 'text', mono: true, placeholder: '留空则不绑代理' })}
                 </div>
             `)}
 
@@ -718,6 +735,11 @@ function collectSettings() {
         grok2api_url: document.getElementById('s-grok2api-url').value,
         grok2api_username: document.getElementById('s-grok2api-username').value,
         grok2api_password: document.getElementById('s-grok2api-password').value,
+        sub2api_auto_upload: document.querySelector('input[name="sub2api-upload"]:checked')?.value || 'false',
+        sub2api_url: document.getElementById('s-sub2api-url')?.value.trim() || '',
+        sub2api_api_key: document.getElementById('s-sub2api-api-key')?.value.trim() || '',
+        sub2api_group_id: document.getElementById('s-sub2api-group-id')?.value.trim() || '',
+        sub2api_proxy_id: document.getElementById('s-sub2api-proxy-id')?.value.trim() || '',
         cpa_auto_export: document.querySelector('input[name="cpa-auto"]:checked')?.value || 'false',
         cpa_probe_chat: document.querySelector('input[name="cpa-probe"]:checked')?.value || 'true',
         cpa_auth_dir: document.getElementById('s-cpa-auth-dir')?.value.trim() || '/cpa/auths',

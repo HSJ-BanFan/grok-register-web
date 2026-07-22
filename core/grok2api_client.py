@@ -375,11 +375,15 @@ def upload_registered_sso(settings, sso_cookie, email='', user_agent='', cloudfl
 
     - CPA (CLIProxyAPI) hotload when ``cpa_auto_export`` is true.
     - grok2api Web import + Build convert when ``grok2api_auto_upload`` is true.
-    Either path may run alone; failures on an enabled path raise so durable retry can re-run.
+    - sub2api single-account import when ``sub2api_auto_upload`` is true
+      (SSO → Device Flow OAuth → POST /accounts/batch with one item).
+    Any path may run alone; failures on an enabled *primary* path raise so
+    durable retry can re-run. Secondary backends log and continue.
     """
     result = {}
     cpa_enabled = (settings.get('cpa_auto_export') or 'false').lower() == 'true'
     grok_enabled = (settings.get('grok2api_auto_upload') or 'false').lower() == 'true'
+    sub2api_enabled = (settings.get('sub2api_auto_upload') or 'false').lower() == 'true'
 
     if cpa_enabled:
         try:
@@ -388,17 +392,41 @@ def upload_registered_sso(settings, sso_cookie, email='', user_agent='', cloudfl
         except Exception as exc:
             raise Grok2APIError(f'CPA export failed: {exc}') from exc
 
+    if sub2api_enabled:
+        try:
+            from core.sub2api_export import export_sso_to_sub2api
+            result['sub2api'] = export_sso_to_sub2api(settings, sso_cookie, email=email)
+        except Exception as exc:
+            # If another backend already succeeded, treat sub2api as secondary.
+            if cpa_enabled or (result.get('cpa') and not result.get('cpa', {}).get('skipped')):
+                logger.warning('sub2api pipeline failed after CPA export (ignored): %s', exc)
+                result['sub2api_error'] = str(exc)
+            elif not grok_enabled:
+                raise Grok2APIError(f'sub2api export failed: {exc}') from exc
+            else:
+                # grok2api still to run — stash and continue; raise later if grok also off path
+                result['sub2api_error'] = str(exc)
+                logger.warning('sub2api pipeline failed (will try grok2api): %s', exc)
+
     if not grok_enabled:
-        if not cpa_enabled:
-            logger.info('No delivery backend enabled (cpa_auto_export / grok2api_auto_upload)')
+        if not cpa_enabled and not sub2api_enabled:
+            logger.info(
+                'No delivery backend enabled '
+                '(cpa_auto_export / grok2api_auto_upload / sub2api_auto_upload)'
+            )
+            return None
+        if sub2api_enabled and result.get('sub2api_error') and not cpa_enabled:
+            raise Grok2APIError(f"sub2api export failed: {result['sub2api_error']}")
         return result if result else None
 
     base_url = settings.get('grok2api_url', '').strip()
     username = settings.get('grok2api_username', '').strip()
     password = settings.get('grok2api_password', '')
     if not base_url or not username or not password:
-        if cpa_enabled:
-            logger.warning('grok2api enabled but incomplete credentials; CPA-only')
+        if cpa_enabled or (sub2api_enabled and not result.get('sub2api_error')):
+            logger.warning('grok2api enabled but incomplete credentials; skipping grok2api')
+            if sub2api_enabled and result.get('sub2api_error') and not cpa_enabled:
+                raise Grok2APIError(f"sub2api export failed: {result['sub2api_error']}")
             return result
         raise Grok2APIError('grok2api auto upload is enabled but URL/username/password is incomplete')
 
@@ -463,13 +491,12 @@ def upload_registered_sso(settings, sso_cookie, email='', user_agent='', cloudfl
                 exc.probe = dict(probe or {})
             except Exception:
                 pass
-        if cpa_enabled:
-            # CPA already succeeded; do not fail the whole delivery on secondary backend.
-            logger.warning('grok2api pipeline failed after CPA export (ignored): %s', exc)
+        if cpa_enabled or (sub2api_enabled and result.get('sub2api') and not result.get('sub2api_error')):
+            # Another backend already succeeded; do not fail the whole delivery.
+            logger.warning('grok2api pipeline failed after other delivery (ignored): %s', exc)
             if isinstance(exc, Grok2APIChatPermissionError):
                 result['grok2api_probe_denied'] = exc.probe
             elif isinstance(probe, dict) and probe.get('ok') and not probe.get('skipped'):
-                # Preserve successful probe when only Web/Build delivery failed.
                 result['grok2api'] = {'probe': probe}
             result['grok2api_error'] = str(exc)
             return result
