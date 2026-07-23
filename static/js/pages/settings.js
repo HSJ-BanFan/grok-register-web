@@ -127,6 +127,8 @@ export async function render(container) {
     const cpaPool = s.cpa_pool_enabled === 'true' ? 'true' : 'false';
     const webActivation = s.grok_web_activation === 'true' ? 'true' : 'false';
     const exportFormat = s.export_format === 'json' ? 'json' : 'txt';
+    const sub2Auto = s.sub2api_auto_upload === 'true' ? 'true' : 'false';
+    const sub2AutoPause = s.sub2api_auto_pause_on_expired === 'false' ? 'false' : 'true';
 
     const markup = `
         <div class="settings-page">
@@ -376,6 +378,49 @@ export async function render(container) {
                 </div>
             `)}
 
+            ${section(ICONS.upload, 'Sub2API 接入', '可选交付后端：把注册成功的 SSO 原文推到 Sub2API，由其完成 SSO→OAuth mint 与建号（v0.1.162+ 支持 Grok 平台 + SSO 导入）。', `
+                <div class="settings-two-col">
+                    <div class="settings-field-block">
+                        <div class="settings-field-label">注册成功后导入 Sub2API</div>
+                        ${choiceGroup('sub2api-auto', [
+                            { value: 'false', title: '不自动导入', desc: '默认。SSO 仅本地保存，不推送。', recommend: true },
+                            { value: 'true', title: '自动导入', desc: '注册成功即 POST 到 /api/v1/admin/grok/sso-to-oauth；失败由后台补传。' },
+                        ], sub2Auto)}
+                    </div>
+                    <div class="settings-field-block">
+                        <div class="settings-field-label">过期自动暂停账号</div>
+                        ${choiceGroup('sub2api-auto-pause', [
+                            { value: 'true', title: '开启', desc: 'Sub2API 侧过期/配额耗尽自动置 disabled（默认）。', recommend: true },
+                            { value: 'false', title: '关闭', desc: '不过问账号健康度。' },
+                        ], sub2AutoPause)}
+                    </div>
+                </div>
+                <div class="settings-grid">
+                    ${field('s-sub2api-url', 'Sub2API 地址', s.sub2api_url || 'http://127.0.0.1:8080', { type: 'text', mono: true })}
+                    ${field('s-sub2api-email', '管理员邮箱（与 API Token 二选一）', s.sub2api_email || '', { type: 'text', mono: true })}
+                    ${field('s-sub2api-password', '管理员密码', s.sub2api_password || '', { type: 'password' })}
+                    ${field('s-sub2api-token', '管理员 API Key（优先于邮箱密码）', s.sub2api_api_token || '', {
+                        type: 'password',
+                        helper: '粘贴 sub2api 后台「设置 → 管理员 API Key」生成的值。本字段会以 <code>x-api-key</code> header 发送,不会走邮箱密码登录流程。',
+                    })}
+                    ${field('s-sub2api-group-ids', '导入到 Group（ID 列表）', s.sub2api_group_ids || '', { type: 'text', mono: true, placeholder: '2 或 2,3' })}
+                    ${field('s-sub2api-proxy-id', '出口代理 ID（留空 = 不用代理）', s.sub2api_proxy_id || '', { min: 0, type: 'number' })}
+                    ${field('s-sub2api-concurrency', '并发 (Sub2API 端 3 worker 固定)', s.sub2api_concurrency || 1, { min: 0, max: 3 })}
+                    ${field('s-sub2api-priority', '优先级', s.sub2api_priority || 1, { min: 0 })}
+                    ${field('s-sub2api-name-prefix', '账号名前缀（留空用邮箱）', s.sub2api_name_prefix || '', { type: 'text', mono: true })}
+                    ${field('s-sub2api-timeout', 'HTTP 超时（秒）', s.sub2api_timeout_sec || 180, { min: 30 })}
+                </div>
+                <div class="settings-field-block">
+                    <div class="settings-field-label">连通性诊断</div>
+                    <div class="settings-action-row">
+                        <button class="btn btn-secondary" id="test-sub2api-btn" type="button">
+                            <span aria-hidden="true">⚡</span> 测试连接
+                        </button>
+                        <div class="helper-text" id="test-sub2api-result">未测试。</div>
+                    </div>
+                </div>
+            `)}
+
             ${section(ICONS.upload, 'grok2api 接入', '注册成功后的可选交付：Web 导入、Build 转换、chat 探测与后台补传。', `
                 <div class="settings-two-col">
                     <div class="settings-field-block">
@@ -456,6 +501,9 @@ export async function render(container) {
     });
     container.querySelector('#stop-solver-btn')?.addEventListener('click', () => {
         void controlLocalSolver('stop');
+    });
+    container.querySelector('#test-sub2api-btn')?.addEventListener('click', () => {
+        void testSub2apiConnection();
     });
     container.querySelector('#s-turnstile-solver-url')?.addEventListener('input', () => {
         setSolverHealth('idle', '待检测', 'URL 已修改，点击“测试连接”检查当前地址。');
@@ -568,6 +616,72 @@ async function testSolverConnection({ notify = false } = {}) {
         const detail = res.success ? solverOfflineDetail(data) : (res.message || '检测请求失败');
         setSolverHealth('offline', '离线', detail);
         if (notify) showToast(detail, 'error');
+    } finally {
+        if (button) button.disabled = false;
+    }
+}
+
+async function testSub2apiConnection() {
+    const button = document.getElementById('test-sub2api-btn');
+    const result = document.getElementById('test-sub2api-result');
+    const setResult = (cls, label, detail) => {
+        if (!result) return;
+        result.className = `helper-text ${cls || ''}`.trim();
+        result.textContent = detail ? `${label} · ${detail}` : label;
+    };
+    const formatDiag = (diag) => {
+        if (!diag || typeof diag !== 'object') return '';
+        const flags = [];
+        if (diag.has_whitespace) flags.push('含空白');
+        if (diag.has_control) flags.push('含控制字符');
+        if (diag.has_non_ascii) flags.push('含非 ASCII');
+        const safe = flags.length ? `（⚠ ${flags.join('、')}）` : '';
+        return `len=${diag.length}${safe}`;
+    };
+    setResult('', '检测中…', '正在检查 Sub2API 连接…');
+    if (button) button.disabled = true;
+    const payload = {
+        sub2api_url: document.getElementById('s-sub2api-url')?.value.trim() || '',
+        sub2api_email: document.getElementById('s-sub2api-email')?.value.trim() || '',
+        sub2api_password: document.getElementById('s-sub2api-password')?.value || '',
+        sub2api_api_token: document.getElementById('s-sub2api-token')?.value.trim() || '',
+        sub2api_group_ids: document.getElementById('s-sub2api-group-ids')?.value.trim() || '',
+        sub2api_proxy_id: document.getElementById('s-sub2api-proxy-id')?.value || '0',
+        sub2api_concurrency: document.getElementById('s-sub2api-concurrency')?.value || '1',
+        sub2api_priority: document.getElementById('s-sub2api-priority')?.value || '1',
+        sub2api_name_prefix: document.getElementById('s-sub2api-name-prefix')?.value.trim() || '',
+        sub2api_auto_pause_on_expired:
+            document.querySelector('input[name="sub2api-auto-pause"]:checked')?.value || 'true',
+        sub2api_timeout_sec: document.getElementById('s-sub2api-timeout')?.value || '180',
+    };
+    try {
+        const res = await api('POST', '/api/settings/sub2api/test', payload);
+        const data = res.data || {};
+        if (res.success && data.ok) {
+            const authLabel = data.auth === 'api_key'
+                ? 'api_key (x-api-key)'
+                : data.auth === 'login'
+                    ? 'login (Bearer)'
+                    : data.auth || '?';
+            const detail = [
+                data.base_url,
+                `auth=${authLabel}`,
+                `groups=${data.group_count ?? 0}`,
+                `grok=${data.grok_group_count ?? 0}`,
+                formatDiag(data.token_diag),
+            ].filter(Boolean).join(' · ');
+            setResult('success', '已连接', detail);
+            showToast(`Sub2API 连接成功：${detail}`, 'success');
+        } else {
+            const reason = (res.message || data.error || '检测请求失败');
+            const diagHint = data.token_diag ? ` ${formatDiag(data.token_diag)}` : '';
+            setResult('error', '连接失败', reason + diagHint);
+            showToast(reason, 'error');
+        }
+    } catch (exc) {
+        const reason = String(exc && exc.message ? exc.message : exc);
+        setResult('error', '连接失败', reason);
+        showToast(reason, 'error');
     } finally {
         if (button) button.disabled = false;
     }
@@ -714,6 +828,18 @@ function collectSettings() {
         grok2api_probe_delay_sec: document.getElementById('s-grok2api-probe-delay')?.value || '45',
         grok2api_probe_retries: document.getElementById('s-grok2api-probe-retries')?.value || '2',
         grok2api_probe_retry_gap_sec: document.getElementById('s-grok2api-probe-gap')?.value || '60',
+        sub2api_auto_upload: document.querySelector('input[name="sub2api-auto"]:checked')?.value || 'false',
+        sub2api_auto_pause_on_expired: document.querySelector('input[name="sub2api-auto-pause"]:checked')?.value || 'true',
+        sub2api_url: document.getElementById('s-sub2api-url')?.value.trim() || '',
+        sub2api_email: document.getElementById('s-sub2api-email')?.value.trim() || '',
+        sub2api_password: document.getElementById('s-sub2api-password')?.value || '',
+        sub2api_api_token: document.getElementById('s-sub2api-token')?.value.trim() || '',
+        sub2api_group_ids: document.getElementById('s-sub2api-group-ids')?.value.trim() || '',
+        sub2api_proxy_id: document.getElementById('s-sub2api-proxy-id')?.value || '0',
+        sub2api_concurrency: document.getElementById('s-sub2api-concurrency')?.value || '1',
+        sub2api_priority: document.getElementById('s-sub2api-priority')?.value || '1',
+        sub2api_name_prefix: document.getElementById('s-sub2api-name-prefix')?.value.trim() || '',
+        sub2api_timeout_sec: document.getElementById('s-sub2api-timeout')?.value || '180',
         grok_web_activation: document.querySelector('input[name="web-activation"]:checked').value,
         grok2api_url: document.getElementById('s-grok2api-url').value,
         grok2api_username: document.getElementById('s-grok2api-username').value,

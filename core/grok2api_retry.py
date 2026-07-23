@@ -60,8 +60,7 @@ class Grok2APIRetryWorker:
                 reg_id,
             )
 
-    def run_once(self):
-        settings = self.db.get_settings()
+    def _run_grok2api_once(self, settings):
         if settings.get('grok2api_auto_upload', 'false') != 'true':
             return 0
         records = self.db.claim_grok2api_retries(limit=20)
@@ -73,6 +72,7 @@ class Grok2APIRetryWorker:
                     settings,
                     record['sso_value'],
                     email=record['email'],
+                    only='grok2api',
                 )
             except Exception as exc:
                 if isinstance(exc, Grok2APIChatPermissionError):
@@ -90,6 +90,13 @@ class Grok2APIRetryWorker:
                         reg_id, result['grok2api_probe_denied'],
                     )
                     self._record_and_emit(reg_id, upload_result=result)
+                elif isinstance(result, dict) and result.get('grok2api_error'):
+                    self.db.finish_grok2api_upload(reg_id, False, result['grok2api_error'])
+                    self._record_and_emit(reg_id, upload_result=result)
+                    logger.warning(
+                        'grok2api durable retry soft-failed: registration_id=%s error=%s',
+                        reg_id, result['grok2api_error'],
+                    )
                 else:
                     self.db.finish_grok2api_upload(reg_id, True)
                     completed += 1
@@ -100,13 +107,56 @@ class Grok2APIRetryWorker:
                     )
         return completed
 
+    def _run_sub2api_once(self, settings):
+        if settings.get('sub2api_auto_upload', 'false') != 'true':
+            return 0
+        records = self.db.claim_sub2api_retries(limit=20)
+        completed = 0
+        for record in records:
+            reg_id = record['id']
+            try:
+                result = upload_registered_sso(
+                    settings,
+                    record['sso_value'],
+                    email=record['email'],
+                    only='sub2api',
+                )
+            except Exception as exc:
+                self.db.finish_sub2api_upload(reg_id, False, exc)
+                logger.warning(
+                    'sub2api durable retry failed: registration_id=%s error=%s',
+                    reg_id, exc,
+                )
+            else:
+                if isinstance(result, dict) and result.get('sub2api_error'):
+                    self.db.finish_sub2api_upload(reg_id, False, result['sub2api_error'])
+                    logger.warning(
+                        'sub2api durable retry soft-failed: registration_id=%s error=%s',
+                        reg_id, result['sub2api_error'],
+                    )
+                else:
+                    self.db.finish_sub2api_upload(reg_id, True)
+                    completed += 1
+                    logger.info(
+                        'sub2api durable retry completed: registration_id=%s',
+                        reg_id,
+                    )
+        return completed
+
+    def run_once(self):
+        settings = self.db.get_settings()
+        completed = 0
+        completed += self._run_grok2api_once(settings)
+        completed += self._run_sub2api_once(settings)
+        return completed
+
     def start(self):
         if self._thread and self._thread.is_alive():
             return
         self._stop.clear()
         self._thread = threading.Thread(
             target=self._run,
-            name='grok2api-delivery-retry',
+            name='delivery-retry',
             daemon=True,
         )
         self._thread.start()
@@ -122,5 +172,6 @@ class Grok2APIRetryWorker:
             try:
                 self.run_once()
             except Exception as exc:
-                logger.warning('grok2api durable retry worker failed: %s', exc)
+                logger.warning('delivery durable retry worker failed: %s', exc)
             self._stop.wait(self.interval_seconds)
+

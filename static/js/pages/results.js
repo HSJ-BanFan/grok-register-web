@@ -36,6 +36,38 @@ function textCell(className, value) {
     return span;
 }
 
+function sub2apiStatusBadge(row) {
+    // Mirrors the sub2api_status values written by core.database:
+    // '', 'uploading', 'success', 'failed'. Reuses existing badge classes
+    // (badge-disabled / badge-running / badge-success / badge-failed) so no
+    // new CSS is required.
+    const status = String(row.sub2api_status || '').toLowerCase();
+    const attempts = Number(row.sub2api_attempts || 0);
+    let label;
+    let tone;
+    if (!status) {
+        label = attempts > 0 ? '已跳过' : '未启用';
+        tone = 'disabled';
+    } else if (status === 'uploading') {
+        label = `推送中 (${attempts})`;
+        tone = 'running';
+    } else if (status === 'success') {
+        label = '已交付';
+        tone = 'success';
+    } else if (status === 'failed') {
+        label = `失败 (${attempts})`;
+        tone = 'failed';
+    } else {
+        label = status;
+        tone = 'disabled';
+    }
+    const span = document.createElement('span');
+    span.className = `badge badge-${tone}`;
+    span.textContent = label;
+    if (row.sub2api_error) span.title = row.sub2api_error;
+    return span;
+}
+
 function metricNode(icon, value, label, tone = 'accent', valueClass = '') {
     const toneMap = {
         accent: 'var(--accent)',
@@ -312,6 +344,7 @@ async function loadSSO() {
                 container.appendChild(btn);
                 return container;
             }},
+            { title: 'Sub2API', width: '140px', render: (r) => sub2apiStatusBadge(r) },
             { title: '采集时间', key: 'created_at', width: '150px', render: (r) => textCell('time-cell', r.created_at ? String(r.created_at).substring(0, 16) : '') },
         ],
         data: rows,

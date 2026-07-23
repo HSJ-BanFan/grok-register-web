@@ -110,6 +110,15 @@ RegistrationEngine
 | **决策** | 纯 HTTP 每轮 `build_protocol_session` 重建，仅移植 CF cookie；`clear_identity_cookies` 走 jar 级多域删除。`extract_verification_code` 优先 subject 的 SpaceXAI/xAI 模式，并 strip HTML。 |
 | **后果** | 批跑不再串号；验证码提取对 Cloud Mail 更稳。 |
 
+### D9 · Sub2API SSO 交付：原文 + 默认关 + 失败后台补传
+
+| | |
+|--|--|
+| **背景** | Sub2API（≥v0.1.162）开始支持 Grok 平台与 SSO 导入路径 `POST /api/v1/admin/grok/sso-to-oauth`。项目原本只支持 CPA / grok2api 双交付，缺少面向 Sub2API 面板的「自动建号」渠道。需要补一个并发可控、默认不开、失败可补传的交付后端。 |
+| **决策** | **交付形态：SSO 原文（不是 OAuth bearer）。**走 Sub2API 公开的 `sso-to-oauth` 路由，由 Sub2API 服务端完成 SSO→OAuth mint 与 `accounts` 建号。**默认 `sub2api_auto_upload=false`**：用户必须显式在设置页开启。**失败语义：一次失败不会让 round 整体 red**——`begin_sub2api_upload` 标记 `sub2api_status='uploading'` 后再 try；失败通过 `claim_sub2api_retries` 在后台补传。**幂等：`finish_sub2api_upload` 用 `WHERE id=?` 覆写；`claim_sub2api_retries` 只选距上次 `sub2api_updated_at` 超过 `retry_delay_seconds` 的记录，避免与在途请求重叠。**并发：本地不做并发——`begin_sub2api_upload` 是 `UPDATE ... WHERE status='success' AND sso_value != ''`，靠 `rowcount == 1` 独占；Sub2API 端固定 3 worker 即可满足。当前并发只受 round 主线程驱动。 |
+| **后果** | 用户多一个「导入到 Sub2API」可选交付；默认关闭不破坏现有流程；一次网络抖动不会让 round 失败；后台补传保证最终一致性。代价：失败时 SSO 已留在本地 DB，需用户人工判断是否需要重复尝试导入。 |
+| **替代方案** | OAuth bearer 直传：Sub2API 不支持，放弃。CPA 同款 mint-后端代理：与现有 CPA 重复，不增加可选维度。同步失败让 round red：违反现有「瞬时失败不让 round 失败」原则。 |
+
 ## 已知限制
 
 1. IMAP 路径扫最近约 40 封邮件，极高噪邮箱可能漏码或变慢。
@@ -118,6 +127,7 @@ RegistrationEngine
 4. `cpa_pool_enabled` 无进程内执行器，文档必须写清依赖外部 timer。
 5. 完整「xAI 发码 → IMAP 取码」e2e 仍依赖真实注册轮次与邮箱库存。
 6. 本地 Solver 首次需下载 Camoufox（约 100MB）；自动 start 失败累计 3 次后停止重试，需手动 restart。
+7. Sub2API 交付要求 Sub2API 版本 ≥v0.1.162（先有 `/api/v1/admin/grok/sso-to-oauth`）；旧版会在 `test_connection` 误报绿——用户需自己看 Sub2API release notes 或在结果页看「Sub2API 状态=已跳过」判断。
 
 ## 安全考量
 
@@ -131,5 +141,6 @@ RegistrationEngine
 | 日期 | 变更 | 理由 |
 |------|------|------|
 | 2026-07-18 | D8：协议批跑 session 重建 + jar 级多域 SSO 清理；OTP subject-first（SpaceXAI） | 连续注册 duplicate SSO；Cloud Mail 主题码被 HTML 伪码抢走 |
+| 2026-07-22 | D9：Sub2API SSO 交付（原文 + 默认关 + 失败后台补传） | Sub2API ≥v0.1.162 开放 Grok + SSO 导入；需要可控、可补传的第三个交付后端 |
 | 2026-07-18 | D7：本地 Turnstile Solver vendoring + solver_manager 生命周期 B | 设置页 5072 默认离线；协议路径需要可复现的真实外置求解能力 |
 | 2026-07-18 | PR #12：Docker/SOCKS 浏览器、MSA IMAP OTP、可选 CPA 导出与双交付语义；补本设计文档 | 容器 SOCKS 挂起、导入号 Graph 401、CPA 热载需求；verify-change 要求大改有 DESIGN 留痕 |

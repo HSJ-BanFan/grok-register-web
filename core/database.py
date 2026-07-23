@@ -81,6 +81,19 @@ DEFAULT_SETTINGS = {
     'grok2api_url': 'http://127.0.0.1:21434',
     'grok2api_username': 'admin',
     'grok2api_password': '',
+    # Sub2API Grok SSO import (POST /api/v1/admin/grok/sso-to-oauth)
+    'sub2api_auto_upload': 'false',
+    'sub2api_url': 'http://127.0.0.1:8080',
+    'sub2api_email': '',
+    'sub2api_password': '',
+    'sub2api_api_token': '',
+    'sub2api_group_ids': '',
+    'sub2api_proxy_id': '',
+    'sub2api_concurrency': '1',
+    'sub2api_priority': '1',
+    'sub2api_name_prefix': '',
+    'sub2api_auto_pause_on_expired': 'true',
+    'sub2api_timeout_sec': '180',
     # Default OFF: opening grok.com after every register triggers managed CF
     # challenges that cannot be fully auto-solved. Upload/Build convert still work
     # without browser CF cookies. Use batch reactivation when CF context is needed.
@@ -183,6 +196,10 @@ class Database:
                     grok2api_probe_http_status INTEGER DEFAULT 0,
                     grok2api_probe_error TEXT DEFAULT '',
                     grok2api_probe_updated_at DATETIME,
+                    sub2api_status TEXT DEFAULT '',
+                    sub2api_error TEXT DEFAULT '',
+                    sub2api_attempts INTEGER DEFAULT 0,
+                    sub2api_updated_at DATETIME,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 );
 
@@ -397,6 +414,10 @@ class Database:
             'grok2api_probe_http_status': 'INTEGER DEFAULT 0',
             'grok2api_probe_error': "TEXT DEFAULT ''",
             'grok2api_probe_updated_at': 'DATETIME',
+            'sub2api_status': "TEXT DEFAULT ''",
+            'sub2api_error': "TEXT DEFAULT ''",
+            'sub2api_attempts': 'INTEGER DEFAULT 0',
+            'sub2api_updated_at': 'DATETIME',
         }
         for name, definition in additions.items():
             if name not in columns:
@@ -1228,7 +1249,8 @@ class Database:
             self.conn.commit()
 
     def complete_registration_success(self, reg_id, alias_id, lease_owner,
-                                      sso, duration=0, grok2api_pending=False):
+                                      sso, duration=0, grok2api_pending=False,
+                                      sub2api_pending=False):
         """Atomically persist a successful registration and release its alias lease."""
         sso = (sso or '').strip()
         fingerprint = self._sso_fingerprint(sso)
@@ -1263,12 +1285,16 @@ class Database:
                 completed_at = datetime.now().isoformat()
                 cur.execute(
                     '''UPDATE registrations SET status='success', sso_value=?,
-                       error_message='', duration_seconds=?, grok2api_status=?,
-                       grok2api_error='', grok2api_updated_at=? WHERE id=?''',
+                       error_message='', duration_seconds=?,
+                       grok2api_status=?, grok2api_error='', grok2api_updated_at=?,
+                       sub2api_status=?, sub2api_error='', sub2api_updated_at=?
+                       WHERE id=?''',
                     (
                         sso, duration,
                         'pending' if grok2api_pending else '',
                         completed_at if grok2api_pending else None,
+                        'pending' if sub2api_pending else '',
+                        completed_at if sub2api_pending else None,
                         reg_id,
                     ),
                 )
@@ -1384,6 +1410,72 @@ class Database:
                            SET grok2api_status='uploading',
                                grok2api_attempts=COALESCE(grok2api_attempts, 0)+1,
                                grok2api_error='', grok2api_updated_at=?
+                           WHERE id=?''',
+                        (claimed_at, row['id']),
+                    )
+                self.conn.commit()
+                return [dict(row) for row in rows]
+            except Exception:
+                self.conn.rollback()
+                raise
+
+    def begin_sub2api_upload(self, reg_id):
+        now = datetime.now().isoformat()
+        with self._write_lock:
+            cur = self.conn.execute(
+                '''UPDATE registrations
+                   SET sub2api_status='uploading',
+                       sub2api_attempts=COALESCE(sub2api_attempts, 0)+1,
+                       sub2api_error='', sub2api_updated_at=?
+                   WHERE id=? AND status='success' AND sso_value != '' ''',
+                (now, reg_id),
+            )
+            self.conn.commit()
+            return cur.rowcount == 1
+
+    def finish_sub2api_upload(self, reg_id, success, error=''):
+        now = datetime.now().isoformat()
+        status = 'success' if success else 'failed'
+        with self._write_lock:
+            self.conn.execute(
+                '''UPDATE registrations
+                   SET sub2api_status=?, sub2api_error=?, sub2api_updated_at=?
+                   WHERE id=?''',
+                (status, '' if success else str(error or '')[:1000], now, reg_id),
+            )
+            self.conn.commit()
+
+    def claim_sub2api_retries(self, limit=20, retry_delay_seconds=30,
+                              stale_upload_seconds=300):
+        """Atomically claim durable Sub2API deliveries ready for retry."""
+        now = datetime.now()
+        retry_cutoff = (now - timedelta(seconds=retry_delay_seconds)).isoformat()
+        stale_cutoff = (now - timedelta(seconds=stale_upload_seconds)).isoformat()
+        with self._write_lock:
+            cur = self.conn.cursor()
+            try:
+                cur.execute('BEGIN IMMEDIATE')
+                rows = cur.execute(
+                    '''SELECT id, email, sso_value, sub2api_status,
+                              sub2api_attempts, sub2api_updated_at
+                       FROM registrations
+                       WHERE status='success' AND sso_value != '' AND (
+                           (sub2api_status IN ('pending', 'failed') AND
+                            (sub2api_updated_at IS NULL OR sub2api_updated_at <= ?))
+                           OR
+                           (sub2api_status='uploading' AND
+                            (sub2api_updated_at IS NULL OR sub2api_updated_at <= ?))
+                       )
+                       ORDER BY id ASC LIMIT ?''',
+                    (retry_cutoff, stale_cutoff, max(1, int(limit))),
+                ).fetchall()
+                claimed_at = datetime.now().isoformat()
+                for row in rows:
+                    cur.execute(
+                        '''UPDATE registrations
+                           SET sub2api_status='uploading',
+                               sub2api_attempts=COALESCE(sub2api_attempts, 0)+1,
+                               sub2api_error='', sub2api_updated_at=?
                            WHERE id=?''',
                         (claimed_at, row['id']),
                     )
@@ -1524,7 +1616,9 @@ class Database:
     def get_registrations(self, reg_type='sso'):
         if reg_type == 'sso':
             rows = self.conn.execute(
-                '''SELECT id, email, sso_value, created_at
+                '''SELECT id, email, sso_value, created_at,
+                          sub2api_status, sub2api_error, sub2api_attempts,
+                          sub2api_updated_at
                    FROM registrations WHERE status='success' AND sso_value != ''
                    ORDER BY created_at DESC'''
             ).fetchall()

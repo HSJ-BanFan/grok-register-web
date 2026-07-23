@@ -1,9 +1,27 @@
 from flask import Blueprint, request, jsonify
 from core.database import DEFAULT_SETTINGS
 from core.registration.turnstile import probe_turnstile_solver
+from core.sub2api_client import test_sub2api_connection
 from services import solver_manager
 
 settings_bp = Blueprint('settings', __name__)
+
+# Allowed setting keys that may override the saved value during a probe.
+# Mirrors the 13 sub2api_* keys defined in core/database.py DEFAULT_SETTINGS.
+_SUB2API_OVERRIDE_KEYS = frozenset({
+    'sub2api_url',
+    'sub2api_email',
+    'sub2api_password',
+    'sub2api_api_token',
+    'sub2api_group_ids',
+    'sub2api_proxy_id',
+    'sub2api_concurrency',
+    'sub2api_priority',
+    'sub2api_name_prefix',
+    'sub2api_auto_pause_on_expired',
+    'sub2api_timeout_sec',
+    'sub2api_auto_upload',
+})
 
 
 def init_settings_api(db):
@@ -112,5 +130,26 @@ def init_settings_api(db):
                 status.get('last_error') or '重启失败'
             ),
         }), (200 if online else 503)
+
+    @settings_bp.route('/api/settings/sub2api/test', methods=['POST'])
+    def test_sub2api():
+        """Probe Sub2API reachability + Grok route support without saving.
+
+        Accepts an optional JSON body with any sub2api_* override keys so the
+        user can dry-run before committing the form. Unrecognised keys are
+        silently dropped.
+        """
+        raw = request.get_json(silent=True) or {}
+        overrides = {
+            k: v for k, v in raw.items() if k in _SUB2API_OVERRIDE_KEYS
+        }
+        settings = {**db.get_settings(), **overrides}
+        result = test_sub2api_connection(settings)
+        ok = bool(result.get('ok'))
+        return jsonify({
+            'success': ok,
+            'data': result,
+            'message': '' if ok else str(result.get('error') or ''),
+        }), (200 if ok else 400)
 
     return settings_bp
