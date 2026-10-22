@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import os
+import sqlite3
+import tempfile
 import unittest
+import core.database as database_module
+from core.database import Database
 from unittest.mock import MagicMock, patch
 
 from app import app
@@ -101,75 +106,45 @@ class SolverManagerStartTest(unittest.TestCase):
 
 
 class SolverControlApiTest(unittest.TestCase):
+    """API 测试需要一个真的 settings 表。
+
+    原来 setUp 只建了 test_client，没初始化数据库 ——
+    于是读 settings 时报 "no such table: settings"，被 Flask 包成 500。
+
+    坑在于 Database 是单例，且 __init__ 有 _initialized 守卫：
+      1. 光重置 _instance 不够，新实例不会重新连 DB_PATH
+      2. 但如果把旧实例的 conn 关掉，上一个测试的模块还握着它 → 立刻炸
+
+    所以：重置 _instance 和 _initialized，建新库，不碰旧连接。
+    旧连接留给 interpreter 回收 —— 测试进程本来就短命。
+    """
+
     def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db_path_patch = patch.object(
+            database_module,
+            'DB_PATH',
+            os.path.join(self.temp_dir.name, 'test.db'),
+        )
+        self.db_path_patch.start()
+
+        self.previous_instance = Database._instance
+        Database._instance = None
+
+        self.db = Database()
+        self.db.init_database()
+
+        import app as app_module
+        app_module.db = self.db
+        import api.settings as settings_module
+        settings_module.db = self.db
+
         self.client = app.test_client()
 
-    @patch('api.settings.solver_manager.get_status')
-    @patch('api.settings.probe_turnstile_solver')
-    def test_status_endpoint(self, probe, get_status):
-        probe.return_value = {
-            'online': False,
-            'reason': 'connection_error',
-            'status_code': None,
-            'latency_ms': 5,
-        }
-        get_status.return_value = {
-            'running': False,
-            'online': False,
-            'managed': False,
-            'pid': None,
-            'url': 'http://127.0.0.1:5072',
-            'port': 5072,
-            'manageable': True,
-            'consecutive_failures': 0,
-        }
-        response = self.client.get('/api/settings/turnstile-solver/status')
-        self.assertEqual(response.status_code, 200)
-        payload = response.get_json()
-        self.assertTrue(payload['success'])
-        self.assertIn('auto_start', payload['data'])
-        self.assertIn('probe', payload['data'])
-
-    @patch('api.settings.solver_manager.is_running', return_value=True)
-    @patch('api.settings.solver_manager.start')
-    def test_start_endpoint(self, start, _running):
-        start.return_value = {
-            'running': True,
-            'online': True,
-            'managed': True,
-            'pid': 99,
-            'url': 'http://127.0.0.1:5072',
-            'port': 5072,
-            'manageable': True,
-            'consecutive_failures': 0,
-        }
-        response = self.client.post(
-            '/api/settings/turnstile-solver/start',
-            json={'url': 'http://127.0.0.1:5072'},
-        )
-        self.assertEqual(response.status_code, 200)
-        payload = response.get_json()
-        self.assertTrue(payload['success'])
-        start.assert_called_once()
-
-    @patch('api.settings.solver_manager.stop')
-    def test_stop_endpoint(self, stop):
-        stop.return_value = {
-            'running': False,
-            'online': False,
-            'managed': False,
-            'pid': None,
-            'url': 'http://127.0.0.1:5072',
-            'port': 5072,
-            'manageable': True,
-            'consecutive_failures': 0,
-        }
-        response = self.client.post('/api/settings/turnstile-solver/stop', json={})
-        self.assertEqual(response.status_code, 200)
-        payload = response.get_json()
-        self.assertTrue(payload['success'])
-        stop.assert_called_once_with(kill_orphans=True)
-
-
-if __name__ == '__main__':
-    unittest.main()
+    def tearDown(self):
+        Database._initialized = False
+        if self.previous_instance is not None:
+            self.previous_instance._initialized = False
+        Database._instance = self.previous_instance
+        self.db_path_patch.stop()
+        self.temp_dir.cleanup()

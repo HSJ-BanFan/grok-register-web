@@ -82,7 +82,7 @@ class Grok2APIClientTest(unittest.TestCase):
 
         self.assertIsNone(result)
         self.assertIn(
-            'No delivery backend enabled (cpa_auto_export / grok2api_auto_upload)',
+            'No delivery backend enabled (cpa_auto_export / sub2api_auto_upload / grok2api_auto_upload)',
             '\n'.join(logs.output),
         )
 
@@ -241,3 +241,46 @@ class Grok2APIClientTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ConversionFailureDiagnosticsTest(unittest.TestCase):
+    """失败时必须说清为什么。
+
+    背景（issue #19）：两个用户都报「注册的号无法转 build」，
+    但日志只有 "grok2api Build conversion failed for Web account N"，
+    没有任何原因。于是谁都没法判断是限流、无权限，还是上游改了策略。
+
+    根因：convert-to-build 返回的是汇总计数（failed=1），
+    异常只带了 account_id，把上游给的信息全丢了。
+    """
+
+    def test_prefers_explicit_error_field(self):
+        from core.grok2api_client import _summarize_conversion_failure
+        got = _summarize_conversion_failure({'failed': 1, 'error': 'no build access'})
+        self.assertIn('no build access', got)
+        self.assertIn('error=', got)
+
+    def test_extracts_per_item_reasons(self):
+        from core.grok2api_client import _summarize_conversion_failure
+        got = _summarize_conversion_failure({
+            'failed': 2,
+            'items': [
+                {'id': 'acc-1', 'ok': False, 'error': 'rate limited'},
+                {'id': 'acc-2', 'ok': False, 'reason': 'tier mismatch'},
+            ],
+        })
+        self.assertIn('rate limited', got)
+        self.assertIn('tier mismatch', got)
+
+    def test_falls_back_to_counts_when_no_detail(self):
+        from core.grok2api_client import _summarize_conversion_failure
+        got = _summarize_conversion_failure({
+            'created': 0, 'linked': 0, 'failed': 1, 'skipped': 0,
+        })
+        self.assertIn('counts=', got)
+        self.assertIn('failed', got)
+
+    def test_never_returns_empty(self):
+        from core.grok2api_client import _summarize_conversion_failure
+        self.assertTrue(_summarize_conversion_failure({}))
+        self.assertTrue(_summarize_conversion_failure(None))
