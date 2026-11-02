@@ -648,7 +648,7 @@ class ProtocolWorkerFailureMappingTest(unittest.TestCase):
             'conversion': {'created': 1},
         }
 
-        worker._upload_grok2api({}, 'sso-token', 'a@b.com', 9)
+        worker._upload_delivery({}, 'sso-token', 'a@b.com', 9, grok2api_enabled=True)
 
         db.begin_grok2api_upload.assert_called_once_with(9)
         db.finish_grok2api_upload.assert_called_once_with(9, True)
@@ -658,7 +658,7 @@ class ProtocolWorkerFailureMappingTest(unittest.TestCase):
         worker, db, state, socketio = self._worker()
         upload.side_effect = RuntimeError('upload failed')
 
-        worker._upload_grok2api({}, 'sso-token', 'a@b.com', 9)
+        worker._upload_delivery({}, 'sso-token', 'a@b.com', 9, grok2api_enabled=True)
 
         db.begin_grok2api_upload.assert_called_once_with(9)
         finish_args = db.finish_grok2api_upload.call_args.args

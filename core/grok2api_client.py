@@ -154,6 +154,50 @@ def sso_to_build_credential(sso_cookie, email=''):
     }
 
 
+
+def _summarize_conversion_failure(result):
+    """把转换失败的结果压成一句能看懂的原因。
+
+    优先级：
+      1. 上游直接给的错误信息（error/message/detail/reason）
+      2. 逐条结果里的失败项（items/accounts/results）
+      3. 退回汇总计数
+
+    宁可多带一点，也不要让"转不了"变成黑箱。
+    """
+    if not isinstance(result, dict):
+        return repr(result)[:300]
+
+    # 1. 上游直接给的错误字段
+    for key in ('error', 'message', 'detail', 'reason'):
+        value = result.get(key)
+        if value:
+            return f'{key}={value}'
+
+    # 2. 逐条结果
+    for key in ('items', 'accounts', 'results', 'failures'):
+        entries = result.get(key)
+        if isinstance(entries, list) and entries:
+            bad = [e for e in entries
+                   if isinstance(e, dict)
+                   and (e.get('error') or e.get('message')
+                        or e.get('reason') or e.get('ok') is False)]
+            if bad:
+                parts = []
+                for e in bad[:3]:
+                    text = (e.get('error') or e.get('message')
+                            or e.get('reason') or 'unknown')
+                    ident = e.get('id') or e.get('accountId') or e.get('name') or ''
+                    parts.append(f'{ident}:{text}' if ident else str(text))
+                suffix = f' (+{len(bad) - 3} more)' if len(bad) > 3 else ''
+                return '; '.join(parts) + suffix
+
+    # 3. 汇总计数
+    keys = ('created', 'linked', 'skipped', 'failed', 'synced', 'syncFailed')
+    counts = {k: result[k] for k in keys if k in result}
+    return f'counts={counts}' if counts else repr(result)[:300]
+
+
 class Grok2APIClient:
     def __init__(self, base_url, username, password, timeout=30):
         self.base_url = base_url.rstrip('/')
@@ -321,8 +365,16 @@ class Grok2APIClient:
                 json_body={'ids': [account_id]},
             )
         if int(converted.get('failed', 0) or 0) > 0:
+            # 只说 "failed" 没用 —— 用户和排查的人都需要知道**为什么**。
+            #
+            # grok2api 的 convert-to-build 返回的是汇总计数
+            # (created/linked/skipped/failed/synced/syncFailed)，
+            # 如果它还带了逐条结果或错误信息，必须原样带出来。
+            # 否则用户只能报「转不了 build」，我们只能猜是限流、
+            # 无权限、还是上游改了策略。
             raise Grok2APIError(
-                f'grok2api Build conversion failed for Web account {account_id}'
+                f'grok2api Build conversion failed for Web account {account_id}: '
+                f'{_summarize_conversion_failure(converted)}'
             )
         logger.info(
             'grok2api Build conversion completed: account=%s web_account_id=%s '

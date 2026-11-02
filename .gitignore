@@ -38,3 +38,4 @@ proxies.txt
 Thumbs.db
 .idea/
 .vscode/
+.venv/

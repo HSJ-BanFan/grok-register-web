@@ -30,6 +30,9 @@ class Grok2APIRetryWorkerTest(unittest.TestCase):
             db.get_settings.return_value,
             'sso-token',
             email='[邮箱]',
+            # sub2api 引入后，重试器显式声明只走 grok2api，
+            # 否则会重复投递给另一个后端。
+            only='grok2api',
         )
         db.finish_grok2api_upload.assert_called_once_with(9, True)
 
